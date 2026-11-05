@@ -38,6 +38,11 @@ try {
     }
     # 不使用 Runner 上其他项目的 target，保证产物来源和归档位置明确。
     $env:CARGO_TARGET_DIR = Join-Path $root 'target'
+    # 项目独立安装检查组件，避免修改其他项目共用的 Runner 工具链。
+    $env:RUSTUP_HOME = Join-Path $root '.ci-tools/rustup'
+    $env:RUSTUP_TOOLCHAIN = $env:RUST_TOOLCHAIN
+    if (-not $env:RUSTUP_TOOLCHAIN) { throw '未指定 CI Rust 工具链版本' }
+    Invoke-Checked 'rustup' @('toolchain', 'install', $env:RUSTUP_TOOLCHAIN, '--profile', 'minimal', '--component', 'rustfmt', '--component', 'clippy', '--no-self-update')
     Write-Host '已导入 x64 MSVC 环境，开始主站校验与构建'
     Invoke-Checked 'node' @('--version')
     Invoke-Checked 'npm.cmd' @('--version')

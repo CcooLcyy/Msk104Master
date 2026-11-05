@@ -5,6 +5,7 @@
 /src-tauri/gen/
 /artifacts/
 /package/
+/.ci-tools/
 *.log
 *.tsbuildinfo
 .env

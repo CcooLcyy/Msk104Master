@@ -18,11 +18,10 @@ windows-ci:
   variables:
     GIT_SUBMODULE_STRATEGY: none
     GIT_DEPTH: "20"
-    GIT_CLEAN_FLAGS: "-ffdx -e /target/"
+    GIT_CLEAN_FLAGS: "-ffdx -e /target/ -e /.ci-tools/"
     CARGO_INCREMENTAL: "0"
     PYTHONUTF8: "1"
-    # 首次初始化时由 CI 生成锁文件，收回并提交后删除此开关。
-    ALLOW_LOCKFILE_BOOTSTRAP: "1"
+    RUST_TOOLCHAIN: "1.97.1"
   before_script:
     - '$ErrorActionPreference = "Stop"'
     - if ($env:RUNNER_ENV_PATH) { . $env:RUNNER_ENV_PATH }
