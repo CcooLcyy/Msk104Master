@@ -74,7 +74,15 @@ mod tests {
     // 拒绝地址为空、带协议、带端口及存在空白或非法标签的情况。
     #[test]
     fn rejects_invalid_hosts() {
-        for host in ["", " host", "host ", "http://host", "host:2404", "a..b", "-host"] {
+        for host in [
+            "",
+            " host",
+            "host ",
+            "http://host",
+            "host:2404",
+            "a..b",
+            "-host",
+        ] {
             let config = ConnectionConfig {
                 host: host.to_owned(),
                 ..Default::default()
