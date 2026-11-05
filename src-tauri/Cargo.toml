@@ -1,0 +1,21 @@
+[package]
+name = "msk104master"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "IEC104 模拟主站桌面应用"
+default-run = "msk104master"
+
+[lib]
+name = "msk104master_lib"
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+iec104-core = { path = "../crates/iec104-core" }
+serde.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+log = "0.4"

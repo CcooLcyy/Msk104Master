@@ -1,0 +1,16 @@
+/node_modules/
+/dist/
+/target/
+/src-tauri/target/
+/src-tauri/gen/
+/artifacts/
+/package/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+/.idea/
+/.vscode/
+Thumbs.db
+.DS_Store

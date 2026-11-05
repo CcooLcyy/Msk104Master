@@ -1,0 +1,9 @@
+[package]
+name = "iec104-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "独立于桌面界面的 IEC104 主站核心"
+
+[dependencies]
+serde.workspace = true

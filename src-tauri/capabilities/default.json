@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "仅授予主窗口的基础能力，不开放文件或进程操作",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
