@@ -16,6 +16,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 iec104-core = { path = "../crates/iec104-core" }
 serde.workspace = true
-tauri = { version = "2", features = [] }
+tauri = { version = "~2.12.5", features = [] }
 tauri-plugin-log = "2"
 log = "0.4"
