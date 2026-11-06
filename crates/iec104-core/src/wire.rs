@@ -224,12 +224,11 @@ pub fn parse_asdu(bytes: &[u8]) -> Result<Asdu, String> {
         _ => unreachable!("类型已在前面校验"),
     };
     let object_length = value_length + if timed { 7 } else { 0 };
-    let expected_length = 6
-        + if sequence {
-            3 + count * object_length
-        } else {
-            count * (3 + object_length)
-        };
+    let expected_length = 6 + if sequence {
+        3 + count * object_length
+    } else {
+        count * (3 + object_length)
+    };
     if bytes.len() != expected_length {
         return Err(format!(
             "ASDU 信息对象长度不符：应为 {expected_length} 字节，实际为 {} 字节",
@@ -244,12 +243,8 @@ pub fn parse_asdu(bytes: &[u8]) -> Result<Asdu, String> {
     let mut sequence_address = 0;
     for index in 0..count {
         let address = if !sequence || index == 0 {
-            let address = u32::from_le_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                0,
-            ]);
+            let address =
+                u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], 0]);
             offset += 3;
             sequence_address = address;
             address

@@ -222,7 +222,9 @@ fn asdu_supports_all_value_types_and_cp56_timestamps() {
 
 #[test]
 fn asdu_rejects_truncation_trailing_data_unknown_types_and_ioa_overflow() {
-    let bytes = [36, 1, 3, 0, 1, 0, 1, 0, 0, 0, 0, 0x80, 0x3f, 0, 1, 2, 3, 4, 5, 6, 7];
+    let bytes = [
+        36, 1, 3, 0, 1, 0, 1, 0, 0, 0, 0, 0x80, 0x3f, 0, 1, 2, 3, 4, 5, 6, 7,
+    ];
     assert!(parse_asdu(&bytes).is_ok());
     for end in 0..bytes.len() {
         assert!(parse_asdu(&bytes[..end]).is_err(), "截断位置：{end}");

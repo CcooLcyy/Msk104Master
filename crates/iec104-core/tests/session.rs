@@ -1,4 +1,6 @@
-use iec104_core::session::{ConnectionState, Direction, Event, Session, SessionOptions, TransferState};
+use iec104_core::session::{
+    ConnectionState, Direction, Event, Session, SessionOptions, TransferState,
+};
 use iec104_core::wire::{Frame, PointValue, UFunction};
 use iec104_core::ConnectionConfig;
 use std::io::{Read, Write};
@@ -55,10 +57,7 @@ fn start_interrogate_acknowledge_and_stop_over_tcp() {
         let mut byte = [0];
         assert_eq!(socket.read(&mut byte).unwrap(), 0);
     });
-    let options = SessionOptions {
-        w: 1,
-        ..options()
-    };
+    let options = SessionOptions { w: 1, ..options() };
     let mut session = Session::connect(config, options).unwrap();
     assert_eq!(session.transfer_state(), TransferState::Stopped);
     assert!(session.interrogate().is_err());
@@ -183,7 +182,10 @@ fn unknown_asdu_keeps_full_raw_frame_and_parse_error() {
     let mut session = Session::connect(config, options()).unwrap();
     session.start().unwrap();
     let mut events = Vec::new();
-    while !events.iter().any(|event| matches!(event, Event::ParseError(_))) {
+    while !events
+        .iter()
+        .any(|event| matches!(event, Event::ParseError(_)))
+    {
         events.extend(session.poll().unwrap());
     }
     assert!(events.iter().any(|event| matches!(event,

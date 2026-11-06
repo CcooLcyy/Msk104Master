@@ -81,9 +81,15 @@ pub enum Direction {
 /// 原始报文与解析结果分开记录；失败时通过 `drain_events` 获取未取走的证据。
 #[derive(Debug)]
 pub enum Event {
-    Frame { direction: Direction, raw: Vec<u8> },
+    Frame {
+        direction: Direction,
+        raw: Vec<u8>,
+    },
     /// write_all 失败时的完整发送尝试；对端可能只收到前缀，不能视为发送成功。
-    SendFailure { raw: Vec<u8>, error: String },
+    SendFailure {
+        raw: Vec<u8>,
+        error: String,
+    },
     Asdu(Asdu),
     ParseError(String),
     Error(String),
@@ -365,7 +371,10 @@ impl Session {
         self.last_activity = now;
         match frame {
             Frame::I { send, recv, asdu } => {
-                if !matches!(self.transfer, TransferState::Started | TransferState::Stopping) {
+                if !matches!(
+                    self.transfer,
+                    TransferState::Started | TransferState::Stopping
+                ) {
                     return self.fail("数据传输未开启时收到 I 帧".to_owned());
                 }
                 if let Err(error) = self.sequence.acknowledge(recv) {
@@ -569,7 +578,9 @@ mod tests {
         session.sequence.pending = VecDeque::from([now, now + Duration::from_secs(5)]);
         session.sequence.acknowledge(1).unwrap();
         assert!(session.check_expired(now + Duration::from_secs(15)).is_ok());
-        assert!(session.check_expired(now + Duration::from_secs(20)).is_err());
+        assert!(session
+            .check_expired(now + Duration::from_secs(20))
+            .is_err());
     }
 
     #[test]
@@ -713,8 +724,12 @@ mod tests {
         assert!(events.iter().any(|event| matches!(event,
             Event::SendFailure { raw, .. } if raw == &[0x68, 4, 7, 0, 0, 0]
         )));
-        assert!(!events.iter().any(|event| matches!(event,
-            Event::Frame { direction: Direction::Send, .. }
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            Event::Frame {
+                direction: Direction::Send,
+                ..
+            }
         )));
         assert_eq!(session.connection_state(), ConnectionState::Disconnected);
     }
