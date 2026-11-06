@@ -75,7 +75,7 @@ def current_head(env):
 
 
 def public_digest(url):
-    request = Request(url, headers={"Cache-Control": "no-cache"})
+    request = Request(url, headers={"Cache-Control": "no-cache", "User-Agent": "msk104master-publisher/1"})
     with urlopen(request, timeout=120) as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 

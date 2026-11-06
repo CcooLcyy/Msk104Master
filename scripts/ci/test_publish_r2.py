@@ -8,10 +8,16 @@ from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from publish_r2 import current_head, list_objects, validate_inputs, validate_policy
+from publish_r2 import current_head, list_objects, public_digest, validate_inputs, validate_policy
 
 
 class ReleaseTests(unittest.TestCase):
+    # 公开校验请求声明发布器身份，并对完整响应计算摘要。
+    def test_public_digest_uses_publisher_identity(self):
+        with patch("publish_r2.urlopen", return_value=io.BytesIO(b"installer")) as request:
+            self.assertEqual(public_digest("https://example.invalid/master.exe"), hashlib.sha256(b"installer").hexdigest())
+        self.assertEqual(request.call_args.args[0].get_header("User-agent"), "msk104master-publisher/1")
+
     # 首次发布不存在旧清单时也必须显式请求 JSON，不受 Runner 的 CLI 默认格式影响。
     def test_empty_object_listing_requests_json(self):
         def run(command, **options):
