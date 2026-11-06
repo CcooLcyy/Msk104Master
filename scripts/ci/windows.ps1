@@ -221,6 +221,12 @@ try {
         sha256 = $hash
     }
     [IO.File]::WriteAllText((Join-Path $root 'package/build-info.json'), (($info | ConvertTo-Json) + "`n"), $utf8)
+    # 仅在交付副本逐项校验一致后回收明确的打包重复文件。
+    $deliveryOutput = & python -B scripts/ci/delivery_cache.py --root $root
+    $deliveryExit = $LASTEXITCODE
+    [IO.File]::WriteAllText((Join-Path $root 'package/logs/delivery-cache.json'), (($deliveryOutput -join "`n") + "`n"), $utf8)
+    Write-Host ($deliveryOutput -join "`n")
+    if ($deliveryExit -ne 0) { throw '主站打包副本验证或回收失败，交付文件已保留，详见 delivery-cache.json' }
     # 磁盘空间检查失败不能推进成功历史；全部产物归档成功后才按引用回收。
     Invoke-Cache 'check' 'after-build'
     Invoke-Cache 'finish' 'success' @('--status', 'success')

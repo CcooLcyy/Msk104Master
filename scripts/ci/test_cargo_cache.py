@@ -391,5 +391,44 @@ class CargoCacheTests(unittest.TestCase):
         self.assertFalse(cache.record(self.root, "test", [self.log([own], extra=[broad])])["complete"])
 
 
+    # Cargo 上提的主程序输出仍引用 deps 下同名原始程序与旁文件。
+    def test_uplifted_binary_keeps_unhashed_deps_outputs_and_controls(self):
+        cache.prepare(self.root)
+        executable = self.file("x86_64-pc-windows-msvc/release/msk104master.exe")
+        original = self.file("x86_64-pc-windows-msvc/release/deps/msk104master.exe")
+        symbols = self.file("x86_64-pc-windows-msvc/release/deps/msk104master.pdb")
+        info = self.file("x86_64-pc-windows-msvc/release/deps/msk104master.d")
+        lock = self.file("release/.cargo-artifact-lock")
+        nsis = self.file("x86_64-pc-windows-msvc/release/nsis/x64/installer.nsi")
+        for stage in cache.STAGES:
+            cache.record(self.root, stage, [self.log([executable])])
+        report = cache.finish(self.root, "success")
+        for path in (original, symbols, info):
+            self.assertTrue(path.is_file())
+            self.assertIn(path.relative_to(self.target).as_posix(), report["audit"]["needed"]["entries"])
+        self.assertIn(lock.relative_to(self.target).as_posix(), report["audit"]["metadata"]["entries"])
+        self.assertIn(nsis.relative_to(self.target).as_posix(), report["audit"]["delivery"]["entries"])
+
+    # 只有本工程 Cargo dep-info 规则及 Rust 源码证据都确认的孤立 .d 才接管。
+    def test_orphan_dep_info_requires_own_source_evidence(self):
+        cache.prepare(self.root)
+        stem = "msk104master_lib-" + "a" * 16
+        old = self.file("release/deps/" + stem + ".d",
+                        ("release/deps/" + stem + ".d: src-tauri/src/lib.rs\n").encode())
+        invalid = self.file("release/deps/msk104master-" + "b" * 16 + ".d", b"unrelated data")
+        foreign = self.file("release/deps/serde-" + "c" * 16 + ".d",
+                            b"serde.rlib: src-tauri/src/lib.rs\n")
+        current = self.file("release/deps/libmsk104master_lib-" + "d" * 16 + ".rlib")
+        cache.check(self.root)
+        self.assertTrue(old.is_file())
+        self.record_all([current])
+        report = cache.finish(self.root, "success")
+        self.assertFalse(old.exists())
+        self.assertTrue(invalid.is_file())
+        self.assertTrue(foreign.is_file())
+        self.assertIn(invalid.relative_to(self.target).as_posix(), report["audit"]["unknown"]["entries"])
+        self.assertIn(foreign.relative_to(self.target).as_posix(), report["audit"]["unknown"]["entries"])
+
+
 if __name__ == "__main__":
     unittest.main()

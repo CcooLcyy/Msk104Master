@@ -87,7 +87,7 @@ def _owned(target, relative):
         if tail[0] in (".fingerprint", "build"):
             return bool(OWN_HASH.fullmatch(tail[1]))
         if tail[0] == "deps":
-            return bool(OWN_FILE.fullmatch(tail[1]))
+            return bool(OWN_FILE.fullmatch(tail[1])) or tail[1] in {"msk104master.exe", "msk104master.pdb", "msk104master.d"}
     return len(tail) == 1 and tail[0] in {
         "msk104master.exe", "msk104master.pdb", "msk104master.d",
         "libmsk104master_lib.rlib", "msk104master_lib.d", "msk104master_lib.pdb",
@@ -255,6 +255,28 @@ def _confirmed_units(target):
                 if any(path.name.startswith(stem + "-" + suffix + ".") or path.name.startswith("lib" + stem + "-" + suffix + ".") for stem in stems):
                     if _owned(target, path.relative_to(target).as_posix()):
                         found.add(path.relative_to(target).as_posix())
+    # 旧脚本可能已删除单元主产物和指纹，仅留下本工程 dep-info；须验证实际规则与源码根。
+    orphan_name = re.compile(r"(msk104master(?:_lib)?|iec104_core)-([a-f0-9]{16})\.d\Z")
+    for profile in _profiles(target):
+        deps = profile / "deps"
+        if not deps.exists():
+            continue
+        entries = list(deps.iterdir())
+        for path in entries:
+            match = orphan_name.fullmatch(path.name)
+            if not match or not _checked(path).is_file():
+                continue
+            stem = path.stem
+            if any(other != path and (other.name.startswith(stem + ".") or other.name.startswith("lib" + stem + ".")) for other in entries):
+                continue
+            package = "iec104-core" if match[1] == "iec104_core" else "msk104master"
+            if (profile / ".fingerprint" / (package + "-" + match[2])).exists():
+                continue
+            text = re.sub(r"/+", "/", path.read_text(encoding="utf-8", errors="replace").replace("\\", "/"))
+            source = r"(?:src-tauri/src|crates/iec104-core/src)/(?![^\s]*\.\./)[A-Za-z0-9_./-]+\.rs"
+            rule = r"(?m)^.*" + re.escape(stem) + r"\.(?:d|rlib|rmeta|exe):[ \t]+[^\n]*" + source
+            if re.search(rule, text):
+                found.add(path.relative_to(target).as_posix())
     return found
 
 
@@ -283,8 +305,8 @@ def _audit(target, state):
         size = path.stat().st_size
         directory = "/".join(Path(relative).parts[:2])
         directories[directory] = directories.get(directory, 0) + size
-        group = ("metadata" if relative.startswith(STATE_DIR + "/") or path.name in {".rustc_info.json", "CACHEDIR.TAG", ".cargo-lock"}
-                 else "delivery" if "/bundle/" in relative else "needed" if covered(relative, current)
+        group = ("metadata" if relative.startswith(STATE_DIR + "/") or path.name in {".rustc_info.json", "CACHEDIR.TAG", ".cargo-lock", ".cargo-artifact-lock", ".cargo-build-lock"}
+                 else "delivery" if "/bundle/" in relative or "/nsis/" in relative else "needed" if covered(relative, current)
                  else "protected" if covered(relative, protected) else ("reclaimable" if cleanup_allowed else "pending") if covered(relative, confirmed) else "unknown")
         groups[group]["bytes"] += size
         groups[group]["entries"].append(relative)
@@ -408,8 +430,14 @@ def record(root, stage, logs):
                 continue
             names = OWN_TARGETS if own_manifest else {name}
             if path.parent.name == "deps" and not any(path.name.startswith(crate + "-") or path.name.startswith("lib" + crate + "-") for crate in names):
-                raise ValueError("Cargo 产物与当前编译目标名称不一致")
+                if not (own_manifest and path.name in {"msk104master.exe", "msk104master.pdb", "msk104master.d"}):
+                    raise ValueError("Cargo 产物与当前编译目标名称不一致")
             add(path)
+            if own_manifest and path.name == "msk104master.exe" and path.parent.name == "release":
+                for filename in ("msk104master.exe", "msk104master.pdb", "msk104master.d"):
+                    original = path.parent / "deps" / filename
+                    if original.exists():
+                        add(original)
             if path.parent.name != "deps":
                 basename = path.name.split(".", 1)[0]
                 aliases = {basename, basename[3:] if basename.startswith("lib") else basename}
