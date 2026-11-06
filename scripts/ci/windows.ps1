@@ -20,8 +20,35 @@ function Invoke-Cache([string]$Action, [string]$ReportName, [string[]]$ExtraArgu
     $cacheOutput = & python -B scripts/ci/cargo_cache.py $Action --root $root @ExtraArguments
     $cacheExit = $LASTEXITCODE
     $reportPath = Join-Path $root "package/logs/cargo-cache-$ReportName.json"
-    [IO.File]::WriteAllText($reportPath, (($cacheOutput -join "`n") + "`n"), $utf8)
-    Write-Host ($cacheOutput -join "`n")
+    $reportText = $cacheOutput -join "`n"
+    [IO.File]::WriteAllText($reportPath, ($reportText + "`n"), $utf8)
+    try {
+        # 完整路径清单只归档，控制台摘要避免撑满 Runner 的日志上限。
+        $report = $reportText | ConvertFrom-Json -ErrorAction Stop
+        $detail = if ($null -ne $report.report) { $report.report } else { $report }
+        $summary = [ordered]@{}
+        foreach ($field in @('run', 'stage', 'complete', 'status', 'target', 'target_bytes', 'free_bytes', 'min_free_bytes')) {
+            if ($null -ne $detail.$field) { $summary[$field] = $detail.$field }
+        }
+        if ($null -ne $report.error) { $summary['error'] = $report.error }
+        if ($null -ne $detail.artifacts) { $summary['artifact_count'] = @($detail.artifacts).Count }
+        if ($null -ne $detail.deleted) { $summary['deleted_count'] = @($detail.deleted).Count }
+        if ($null -ne $detail.unconfirmed) { $summary['unconfirmed_count'] = @($detail.unconfirmed).Count }
+        if ($null -ne $detail.audit) {
+            $auditSummary = [ordered]@{}
+            foreach ($category in @('needed', 'protected', 'reclaimable', 'pending', 'unknown', 'metadata', 'delivery')) {
+                $group = $detail.audit.$category
+                if ($null -ne $group) {
+                    $auditSummary[$category] = @{ bytes = $group.bytes; entry_count = @($group.entries).Count }
+                }
+            }
+            $auditSummary['cleanup_allowed'] = $detail.audit.cleanup_allowed
+            $summary['audit'] = $auditSummary
+        }
+        Write-Host ($summary | ConvertTo-Json -Compress -Depth 5)
+    } catch {
+        Write-Host $reportText
+    }
     if ($cacheExit -ne 0) { throw "主站编译缓存操作失败：$Action（退出码 $cacheExit），详见 $reportPath" }
 }
 
@@ -47,6 +74,7 @@ function Invoke-CargoStep([string]$Program, [string[]]$Arguments, [string]$Cache
     if ($commandFailure) { throw $commandFailure }
     if ($commandExit -ne 0) { throw "命令执行失败：$Program（退出码 $commandExit）" }
     if ($recordFailure) { throw $recordFailure }
+    Invoke-Cache 'check' "after-$CacheStage"
 }
 
 function Restore-CargoRecords {
@@ -193,7 +221,7 @@ try {
         sha256 = $hash
     }
     [IO.File]::WriteAllText((Join-Path $root 'package/build-info.json'), (($info | ConvertTo-Json) + "`n"), $utf8)
-    # 预算检查失败不能推进成功历史；全部产物归档成功后才更新保留集。
+    # 磁盘空间检查失败不能推进成功历史；全部产物归档成功后才按引用回收。
     Invoke-Cache 'check' 'after-build'
     Invoke-Cache 'finish' 'success' @('--status', 'success')
     Write-Host '主站检查与 Windows NSIS 安装包构建完成，受保护 main 的签名产物将进入 R2 发布阶段'

@@ -1,4 +1,4 @@
-"""在主站独占 target 中登记、回收自有 Cargo 产物并检查磁盘预算。"""
+"""在主站独占 target 中登记、按实际引用回收 Cargo 产物并审计磁盘占用。"""
 
 import argparse
 import json
@@ -16,8 +16,8 @@ GIB = 1024 ** 3
 STATE_DIR = ".master-cache"
 STAGES = ("clippy", "test", "package")
 PACKAGES = {"src-tauri/Cargo.toml": "msk104master", "crates/iec104-core/Cargo.toml": "iec104-core"}
-OWN_HASH = re.compile(r"(?:msk104master|iec104-core)-[a-f0-9]{16}\Z")
-OWN_FILE = re.compile(r"(?:lib)?(?:msk104master(?:_lib)?|iec104_core)-[a-f0-9]{16}(?:\.[A-Za-z0-9_-]+)+\Z")
+OWN_HASH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*-[a-f0-9]{16}\Z")
+OWN_FILE = re.compile(r"(?:lib)?[A-Za-z0-9_]+-[a-f0-9]{16}(?:\.[A-Za-z0-9_-]+)+\Z")
 OWN_TARGETS = {"msk104master", "msk104master_lib", "iec104_core", "build_script_build"}
 
 
@@ -166,17 +166,21 @@ def _save(target, state):
     _write(target / STATE_DIR / "state.json", state)
 
 
-def _cleanup(target, state, current=True):
-    protected = set(state["successes"][-2:])
+def _cleanup(target, state, current=True, complete=False):
+    if not complete:
+        return []
+    protected = set(state["successes"][-1:])
     if current and _run() in state["runs"]:
         protected.add(_run())
     keep = {path for run in protected for path in state["runs"][run]["artifacts"]}
     expired = [run for run in state["runs"] if run not in protected]
-    candidates = {path for run in expired for path in state["runs"][run]["artifacts"]} - keep
+    candidates = ({path for run in expired for path in state["runs"][run]["artifacts"]} | _confirmed_units(target)) - keep
     planned = []
-    # 整份计划先校验，再开始删除；未知和依赖产物从不进入候选集。
+    # 只有完整成功后才回收具有 Cargo 证据且本轮未引用的单元。
     for relative in sorted(candidates):
         path, _ = _artifact(target, target / relative)
+        if any(relative == item or relative.startswith(item + "/") or item.startswith(relative + "/") for item in keep):
+            continue
         if any(relative.startswith(parent + "/") for parent in planned):
             continue
         _tree(path)
@@ -189,35 +193,118 @@ def _cleanup(target, state, current=True):
             state["runs"][run]["artifacts"] = []
         else:
             del state["runs"][run]
-    state["successes"] = state["successes"][-2:]
+    state["successes"] = state["successes"][-1:]
     return planned
 
 
 def _budgets():
-    values = []
-    for name, default in (("MASTER_CARGO_MIN_FREE_GIB", "10"), ("MASTER_CARGO_MAX_CACHE_GIB", "20")):
-        try:
-            value = float(os.environ.get(name, default))
-        except ValueError as error:
-            raise ValueError("空间预算不是数字：" + name) from error
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError("空间预算必须是有限正数：" + name)
-        values.append(int(value * GIB))
-    return values
+    name = "MASTER_CARGO_MIN_FREE_GIB"
+    try:
+        value = float(os.environ.get(name, "10"))
+    except ValueError as error:
+        raise ValueError("磁盘最低剩余空间不是数字：" + name) from error
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("磁盘最低剩余空间必须是有限正数")
+    return int(value * GIB)
+
+
+def _profiles(target):
+    return [target / "release", target / "x86_64-pc-windows-msvc/release"]
+
+
+def _confirmed_units(target):
+    """只接管具有 Cargo 指纹 JSON 证据的单元；未知文件不能仅凭名字删除。"""
+    found = set()
+    for profile in _profiles(target):
+        fingerprints = profile / ".fingerprint"
+        if not fingerprints.exists():
+            continue
+        deps_by_hash = {}
+        deps = profile / "deps"
+        if deps.exists():
+            for path in deps.iterdir():
+                match = re.search(r"-([a-f0-9]{16})(?:\.|$)", path.name)
+                if match:
+                    deps_by_hash.setdefault(match[1], []).append(path)
+        for folder in fingerprints.iterdir():
+            _checked(folder)
+            if not folder.is_dir() or not OWN_HASH.fullmatch(folder.name):
+                continue
+            valid = False
+            stems = {folder.name.rsplit("-", 1)[0].replace("-", "_")}
+            for metadata in folder.glob("*.json"):
+                try:
+                    value = json.loads(_checked(metadata).read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    continue
+                fingerprint_name = re.fullmatch(r"(?:(?:test-|bench-)?(?:lib|bin|example)-[A-Za-z0-9_-]+|(?:run-)?build-script-build-script-build)\.json", metadata.name)
+                if (fingerprint_name and isinstance(value, dict) and type(value.get("rustc")) is int
+                        and isinstance(value.get("deps"), list) and isinstance(value.get("local"), list)):
+                    valid = True
+                    match = re.fullmatch(r"(?:test-)?(?:lib|bin|example)-(.+)\.json", metadata.name)
+                    if match:
+                        stems.add(match[1].replace("-", "_"))
+            if not valid:
+                continue
+            found.add(folder.relative_to(target).as_posix())
+            build = profile / "build" / folder.name
+            if build.exists():
+                found.add(build.relative_to(target).as_posix())
+            suffix = folder.name.rsplit("-", 1)[1]
+            for path in deps_by_hash.get(suffix, []):
+                if any(path.name.startswith(stem + "-" + suffix + ".") or path.name.startswith("lib" + stem + "-" + suffix + ".") for stem in stems):
+                    if _owned(target, path.relative_to(target).as_posix()):
+                        found.add(path.relative_to(target).as_posix())
+    return found
+
+
+def _audit(target, state):
+    entry = state["runs"].get(_run(), {})
+    current = set(entry.get("artifacts", []))
+    cleanup_allowed = (entry.get("status") == "success" and entry.get("reference_schema") == 2
+                       and set(entry.get("stages", {})) == set(STAGES)
+                       and all(stage.get("complete") for stage in entry["stages"].values()))
+    protected = {p for run in state["successes"][-1:] if run != _run() for p in state["runs"][run]["artifacts"]}
+    confirmed = _confirmed_units(target) | {p for entry in state["runs"].values() for p in entry["artifacts"]}
+    groups = {name: {"bytes": 0, "entries": []} for name in ("needed", "protected", "reclaimable", "pending", "unknown", "metadata", "delivery")}
+    directories = {}
+    def covered(relative, references):
+        parts = relative.split("/")
+        return any("/".join(parts[:index]) in references for index in range(1, len(parts) + 1))
+    def visit(path):
+        _checked(path)
+        if path.is_dir():
+            for entry in path.iterdir():
+                visit(entry)
+            return
+        if not path.is_file():
+            raise ValueError("缓存节点不是普通文件：" + str(path))
+        relative = path.relative_to(target).as_posix()
+        size = path.stat().st_size
+        directory = "/".join(Path(relative).parts[:2])
+        directories[directory] = directories.get(directory, 0) + size
+        group = ("metadata" if relative.startswith(STATE_DIR + "/") or path.name in {".rustc_info.json", "CACHEDIR.TAG", ".cargo-lock"}
+                 else "delivery" if "/bundle/" in relative else "needed" if covered(relative, current)
+                 else "protected" if covered(relative, protected) else ("reclaimable" if cleanup_allowed else "pending") if covered(relative, confirmed) else "unknown")
+        groups[group]["bytes"] += size
+        groups[group]["entries"].append(relative)
+    if target.exists():
+        visit(target)
+    return {**groups, "directory_bytes": directories, "cleanup_allowed": cleanup_allowed,
+            "pending_reason": "完整成功的当前引用图尚未确认，不能判断这些历史单元是否冗余",
+            "unknown_reason": "缺少可验证的 Cargo 输出或指纹归属证据"}
 
 
 def _report(target, state, **extra):
-    minimum, maximum = _budgets()
-    return {"run": _run(), "target": str(target), "target_bytes": _tree(target),
-            "free_bytes": shutil.disk_usage(target)[2], "min_free_bytes": minimum,
-            "max_cache_bytes": maximum, "successes": state["successes"], **extra}
+    audit = _audit(target, state)
+    return {"run": _run(), "target": str(target), "target_bytes": sum(audit[x]["bytes"] for x in ("needed", "protected", "reclaimable", "pending", "unknown", "metadata", "delivery")),
+            "free_bytes": shutil.disk_usage(target)[2], "min_free_bytes": _budgets(),
+            "successes": state["successes"], "audit": audit, **extra}
 
 
 def _capacity(report):
     if report["free_bytes"] < report["min_free_bytes"]:
-        raise CapacityError("磁盘可用空间不足，保留未知及其他工程缓存；请按报告处理容量", report)
-    if report["target_bytes"] > report["max_cache_bytes"]:
-        raise CapacityError("本项目 target 超出缓存预算，拒绝扩大清理范围", report)
+        raise CapacityError("磁盘可用空间不足，保留必要缓存及其他工程数据；请按审计报告处理容量", report)
     return report
 
 
@@ -271,6 +358,10 @@ def record(root, stage, logs):
                     messages.append(value)
     artifacts, package_ids = set(), set()
     own = 0
+    unconfirmed = []
+    sidecar_cache = {}
+    lock = root / "Cargo.lock"
+    dependencies = {(p["name"], p["version"]) for p in tomllib.loads(lock.read_text(encoding="utf-8")).get("package", [])} if lock.exists() else set()
 
     def add(path):
         path, relative = _artifact(target, path)
@@ -285,16 +376,28 @@ def record(root, stage, logs):
             add(fingerprint)
 
     for message in messages:
-        if message.get("reason") != "compiler-artifact" or Path(message.get("manifest_path", "")) not in manifests:
+        if message.get("reason") != "compiler-artifact":
             continue
-        _checked(message["manifest_path"])
+        manifest = Path(message.get("manifest_path", ""))
+        own_manifest = manifest in manifests
+        if not own_manifest:
+            if not manifest.is_absolute() or not manifest.is_file():
+                unconfirmed.append(message.get("package_id", "缺少包身份"))
+                continue
+            package = tomllib.loads(_checked(manifest).read_text(encoding="utf-8")).get("package", {})
+            if (package.get("name"), package.get("version")) not in dependencies:
+                unconfirmed.append(message.get("package_id", "缺少包身份"))
+                continue
+        _checked(manifest)
         name = message.get("target", {}).get("name", "").replace("-", "_")
-        if name not in OWN_TARGETS:
+        if own_manifest and name not in OWN_TARGETS:
             raise ValueError("自有 crate 报告未知的编译目标")
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            raise ValueError("Cargo 编译目标名称无效")
         if not isinstance(message.get("package_id"), str) or not message["package_id"]:
             raise ValueError("自有 crate 缺少 Cargo 包身份")
         package_ids.add(message["package_id"])
-        own += 1
+        own += int(own_manifest)
         filenames = list(message.get("filenames", []))
         if message.get("executable"):
             filenames.append(message["executable"])
@@ -303,23 +406,61 @@ def record(root, stage, logs):
             if path.parent.parent.name == "build" and OWN_HASH.fullmatch(path.parent.name):
                 unit(path.parent)
                 continue
+            names = OWN_TARGETS if own_manifest else {name}
+            if path.parent.name == "deps" and not any(path.name.startswith(crate + "-") or path.name.startswith("lib" + crate + "-") for crate in names):
+                raise ValueError("Cargo 产物与当前编译目标名称不一致")
             add(path)
+            if path.parent.name != "deps":
+                basename = path.name.split(".", 1)[0]
+                aliases = {basename, basename[3:] if basename.startswith("lib") else basename}
+                for alias in aliases:
+                    for extension in (".d", ".pdb"):
+                        sibling = path.parent / (alias + extension)
+                        if sibling.exists() and _owned(target, sibling.relative_to(target).as_posix()):
+                            add(sibling)
             match = re.search(r"-([a-f0-9]{16})(?:\.|$)", path.name)
             if match:
+                stem = re.sub(r"(?:\.[A-Za-z0-9_-]+)+$", "", path.name)
+                stems = {stem, stem[3:] if stem.startswith("lib") else stem}
+                if path.parent not in sidecar_cache:
+                    sidecar_cache[path.parent] = list(path.parent.iterdir())
+                for sidecar in sidecar_cache[path.parent]:
+                    if any(sidecar.name.startswith(item + ".") for item in stems) and _owned(target, sidecar.relative_to(target).as_posix()):
+                        add(sidecar)
                 profile = path.parent.parent if path.parent.name == "deps" else path.parent
-                package = "iec104-core" if "iec104_core" in path.name else "msk104master"
-                fingerprint = profile / ".fingerprint" / (package + "-" + match[1])
+                package_name = PACKAGES[manifest.relative_to(root).as_posix()] if own_manifest else tomllib.loads(manifest.read_text(encoding="utf-8"))["package"]["name"]
+                fingerprint = profile / ".fingerprint" / (package_name + "-" + match[1])
                 if fingerprint.exists():
                     add(fingerprint)
     for message in messages:
-        if message.get("reason") == "build-script-executed" and message.get("package_id") in package_ids:
-            unit(_checked(message["out_dir"]).parent)
-    complete = bool(own and artifacts) and any(
+        if message.get("reason") == "build-script-executed":
+            if message.get("package_id") in package_ids:
+                unit(_checked(message["out_dir"]).parent)
+                for linked in message.get("linked_paths", []):
+                    # native=、framework= 等是 Cargo 的搜索类型前缀，路径本身仍需逐层验证。
+                    location = linked.split("=", 1)[1] if "=" in linked else linked
+                    search = _checked(location)
+                    try:
+                        relative = search.relative_to(target)
+                    except ValueError:
+                        # 系统 SDK 和 target 外的搜索目录不属于本缓存清理范围。
+                        continue
+                    parts = relative.parts
+                    build_index = 1 if parts[:1] == ("release",) else 2 if parts[:2] == ("x86_64-pc-windows-msvc", "release") else -1
+                    if (build_index >= 0 and len(parts) > build_index + 1
+                            and parts[build_index] == "build" and OWN_HASH.fullmatch(parts[build_index + 1])):
+                        unit(target.joinpath(*parts[:build_index + 2]))
+                    else:
+                        unconfirmed.append("无法精确归属的原生搜索目录：" + str(search))
+            else:
+                unconfirmed.append(message.get("package_id", "缺少构建脚本身份"))
+    complete = bool(own and artifacts and not unconfirmed) and any(
         message.get("reason") == "build-finished" and message.get("success") is True for message in messages)
-    entry["stages"][stage] = {"complete": complete}
+    entry["reference_schema"] = 2
+    entry["stages"][stage] = {"complete": complete, "unconfirmed": sorted(set(unconfirmed))}
     entry["artifacts"] = sorted(set(entry["artifacts"]) | artifacts)
     _save(target, state)
-    return {"run": _run(), "stage": stage, "complete": complete, "artifacts": sorted(artifacts)}
+    return {"run": _run(), "stage": stage, "complete": complete, "artifacts": sorted(artifacts), "unconfirmed": sorted(set(unconfirmed))}
 
 
 def finish(root, status):
@@ -335,13 +476,15 @@ def finish(root, status):
         if status == "success":
             if entry["status"] != "running":
                 raise ValueError("失败构建不能重新晋升为成功")
+            if entry.get("reference_schema") != 2:
+                raise ValueError("旧版自有产物记录不包含完整依赖引用，不能执行全量回收")
             if set(entry["stages"]) != set(STAGES) or not all(value.get("complete") for value in entry["stages"].values()):
                 raise ValueError("成功构建必须完整记录 Release 检查、测试和打包阶段")
             state["successes"] = [run for run in state["successes"] if run != _run()] + [_run()]
         entry["status"] = status
     elif status == "success":
         raise ValueError("当前构建没有登记，不能标记成功")
-    deleted = _cleanup(target, state, current=status == "success")
+    deleted = _cleanup(target, state, current=status == "success", complete=status == "success")
     _save(target, state)
     return _report(target, state, status=status if entry else "unregistered", deleted=deleted)
 

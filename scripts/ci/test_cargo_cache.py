@@ -128,8 +128,8 @@ class CargoCacheTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cache.prepare(self.root)
 
-    # 最近两个成功引用受保护，第三次成功才回收不再引用的自有旧产物。
-    def test_keeps_two_successes_and_preserves_dependencies(self):
+    # 完整成功后仅保留本轮必要引用，不永久保留历史成功变体。
+    def test_keeps_current_success_and_preserves_unconfirmed_files(self):
         cache.prepare(self.root)
         paths = []
         dependency = self.file("release/deps/libserde-" + "e" * 16 + ".rlib")
@@ -141,13 +141,13 @@ class CargoCacheTests(unittest.TestCase):
             self.record_all([paths[-1]])
             report = cache.finish(self.root, "success")
         self.assertFalse(paths[0].exists())
-        self.assertTrue(paths[1].is_file())
+        self.assertFalse(paths[1].exists())
         self.assertTrue(paths[2].is_file())
-        self.assertEqual(report["successes"], ["2:2", "3:3"])
+        self.assertEqual(report["successes"], ["3:3"])
         self.assertTrue(dependency.is_file())
         self.assertTrue(unknown.is_file())
 
-    # 失败只回收失败产物，不能删除前次成功或双方共同引用的文件。
+    # 失败保留最后成功与本轮部分产物，方便后续重试。
     def test_failed_finish_preserves_success_and_shared_artifact(self):
         cache.prepare(self.root)
         shared = self.file("release/deps/libiec104_core-" + "a" * 16 + ".rlib")
@@ -158,18 +158,18 @@ class CargoCacheTests(unittest.TestCase):
         cache.record(self.root, "test", [self.log([shared, failed], success=False)])
         report = cache.finish(self.root, "failed")
         self.assertTrue(shared.is_file())
-        self.assertFalse(failed.exists())
+        self.assertTrue(failed.is_file())
         self.assertEqual(report["successes"], ["1:1"])
         self.assertEqual(cache.finish(self.root, "failed")["successes"], ["1:1"])
 
-    # 硬中断没有收尾时，下次 prepare 回收已登记孤立产物，连续失败不累积。
-    def test_prepare_recovers_abandoned_run(self):
+    # 未完整成功前不能判定历史部分产物无用，prepare 不主动删除。
+    def test_prepare_preserves_unconfirmed_abandoned_outputs(self):
         cache.prepare(self.root)
         for run in range(1, 4):
             path = self.file("release/deps/libmsk104master_lib-" + str(run) * 16 + ".rlib")
             cache.record(self.root, "test", [self.log([path], success=False)])
             self.next_run(run + 1)
-            self.assertFalse(path.exists())
+            self.assertTrue(path.is_file())
         self.assertEqual(cache.check(self.root)["successes"], [])
 
     # 缺阶段或 Cargo 失败消息均不能将构建晋升成成功保留记录。
@@ -195,16 +195,16 @@ class CargoCacheTests(unittest.TestCase):
         self.assertEqual(report["successes"], ["1:1"])
         self.assertTrue(path.is_file())
 
-    # 主脚本已经失败收尾后，after_script 仍能重放迟到消息再幂等回收。
-    def test_after_script_can_replay_failed_run(self):
+    # after_script 重放失败日志仅登记引用，不猜测删除部分产物。
+    def test_after_script_can_register_failed_run_for_retry(self):
         cache.prepare(self.root)
         cache.finish(self.root, "failed")
         path = self.file("release/deps/libmsk104master_lib-" + "a" * 16 + ".rlib")
         cache.record(self.root, "test", [self.log([path], success=False)])
-        self.assertIn(path.relative_to(self.target).as_posix(), cache.finish(self.root, "failed")["deleted"])
-        self.assertFalse(path.exists())
+        self.assertEqual(cache.finish(self.root, "failed")["deleted"], [])
+        self.assertTrue(path.is_file())
 
-    # 即使产物名类似，其他清单中的消息也不能登记为本工程所有。
+    # 不能确认身份的外部清单不能被当成已收齐的依赖引用。
     def test_record_ignores_external_manifest(self):
         cache.prepare(self.root)
         path = self.file("release/deps/libmsk104master_lib-" + "a" * 16 + ".rlib")
@@ -227,7 +227,7 @@ class CargoCacheTests(unittest.TestCase):
         self.assertTrue(external.is_file())
         self.assertTrue(dependency.is_file())
 
-    # 自有 build-script 输出目录与 fingerprint 一并登记，第三方 build 不登记。
+    # build-script 输出目录与 fingerprint 一并登记，维持整单元引用。
     def test_records_owned_build_script_units(self):
         cache.prepare(self.root)
         unit = "msk104master-" + "a" * 16
@@ -250,7 +250,7 @@ class CargoCacheTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cache.finish(self.root, "failed")
 
-    # 空间不足与项目预算超限有明确报告，不删除未知大文件。
+    # 磁盘空间不足有明确报告，旧大小限制不影响保留未知数据。
     def test_capacity_failures_preserve_unknown_data(self):
         cache.prepare(self.root)
         unknown = self.file("release/deps/unknown.bin", b"1234")
@@ -258,10 +258,11 @@ class CargoCacheTests(unittest.TestCase):
             with self.assertRaises(cache.CapacityError) as error:
                 cache.check(self.root)
             self.assertEqual(error.exception.report["free_bytes"], 1)
+        # 已撤销的旧大小限制即使存在于外部环境，也不能拒绝有效缓存。
         with patch.dict(os.environ, {"MASTER_CARGO_MAX_CACHE_GIB": "0.000000001"}):
-            with self.assertRaises(cache.CapacityError) as error:
-                cache.check(self.root)
-            self.assertGreater(error.exception.report["target_bytes"], 1)
+            report = cache.check(self.root)
+            self.assertGreater(report["target_bytes"], 1)
+            self.assertNotIn("max_cache_bytes", report)
         self.assertTrue(unknown.is_file())
 
     # 非法预算值需显式失败，不能被解释为禁用空间检查。
@@ -280,6 +281,114 @@ class CargoCacheTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("error", json.loads(stdout.getvalue()))
         self.assertEqual(json.loads(stdout.getvalue())["report"]["free_bytes"], 1)
+
+
+    # 具有真实 Cargo 指纹结构的旧第三方变体在完整成功后清理，当前旁文件保留。
+    def test_sweeps_confirmed_old_dependency_and_keeps_sidecars(self):
+        cache.prepare(self.root)
+        old = self.file("release/deps/libtauri-" + "a" * 16 + ".rlib")
+        old_fp = self.file("release/.fingerprint/tauri-" + "a" * 16 + "/lib-tauri.json",
+                           b'{"rustc":1,"features":"[]","target":1,"profile":1,"deps":[],"local":[]}')
+        current = self.file("release/deps/libmsk104master_lib-" + "b" * 16 + ".rlib")
+        sidecar = self.file("release/deps/msk104master_lib-" + "b" * 16 + ".d")
+        unknown = self.file("release/deps/libmystery-" + "c" * 16 + ".rlib")
+        cache.check(self.root)
+        self.assertTrue(old.exists())
+        self.record_all([current])
+        report = cache.finish(self.root, "success")
+        self.assertFalse(old.exists())
+        self.assertFalse(old_fp.exists())
+        self.assertTrue(current.is_file())
+        self.assertTrue(sidecar.is_file())
+        self.assertTrue(unknown.is_file())
+        self.assertIn(unknown.relative_to(self.target).as_posix(), report["audit"]["unknown"]["entries"])
+
+    # 外部依赖由清单身份与锁文件确认，Fresh 消息同样能保护必要缓存。
+    def test_records_locked_dependency_fresh_artifact(self):
+        cache.prepare(self.root)
+        manifest = self.root / "registry/serde/Cargo.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('[package]\nname="serde"\nversion="1.0.0"\n', encoding="utf-8")
+        (self.root / "Cargo.lock").write_text('[[package]]\nname="serde"\nversion="1.0.0"\n', encoding="utf-8")
+        artifact = self.file("release/deps/libserde-" + "a" * 16 + ".rlib")
+        own = self.file("release/deps/libmsk104master_lib-" + "b" * 16 + ".rlib")
+        msg = {"reason":"compiler-artifact", "manifest_path":str(manifest),
+               "package_id":"registry+https://example.invalid#serde@1.0.0",
+               "target":{"name":"serde"}, "filenames":[str(artifact)], "fresh":True}
+        log = self.log([own], extra=[msg])
+        for stage in cache.STAGES:
+            cache.record(self.root, stage, [log])
+        report = cache.finish(self.root, "success")
+        self.assertTrue(artifact.is_file())
+        self.assertIn(artifact.relative_to(self.target).as_posix(), report["audit"]["needed"]["entries"])
+
+
+    # 仅名称和几个同名字段不足以证明 Cargo 归属，伪造指纹不能触发回收。
+    def test_invalid_fingerprint_stays_unknown(self):
+        cache.prepare(self.root)
+        stale = self.file("release/deps/libtauri-" + "a" * 16 + ".rlib")
+        self.file("release/.fingerprint/tauri-" + "a" * 16 + "/not-cargo.json",
+                  b'{"rustc":1,"deps":[],"local":[]}')
+        self.file("release/.fingerprint/tauri-" + "a" * 16 + "/lib-tauri.json",
+                  b'{"rustc":"invalid","deps":[],"local":[]}')
+        current = self.file("release/deps/libmsk104master_lib-" + "b" * 16 + ".rlib")
+        self.record_all([current])
+        report = cache.finish(self.root, "success")
+        self.assertTrue(stale.is_file())
+        self.assertIn(stale.relative_to(self.target).as_posix(), report["audit"]["unknown"]["entries"])
+
+
+    # 完整日志中若出现身份无法确认的依赖，不能因 own target 成功就清扫该依赖。
+    def test_unconfirmed_dependency_prevents_complete_sweep(self):
+        cache.prepare(self.root)
+        own = self.file("release/deps/libmsk104master_lib-" + "a" * 16 + ".rlib")
+        extra = [{"reason":"compiler-artifact", "manifest_path":str(self.root / "missing/Cargo.toml"),
+                  "package_id":"unconfirmed", "target":{"name":"serde"}, "filenames":[]}]
+        log = self.log([own], extra=extra)
+        for stage in cache.STAGES:
+            self.assertFalse(cache.record(self.root, stage, [log])["complete"])
+        with self.assertRaises(ValueError):
+            cache.finish(self.root, "success")
+        self.assertTrue(own.is_file())
+
+
+    # 阶段未齐时，已确认的历史 Cargo 单元只能列待确认，不能误报为可回收冗余。
+    def test_partial_reference_graph_defers_redundancy_claim(self):
+        cache.prepare(self.root)
+        old = self.file("release/deps/libtauri-" + "a" * 16 + ".rlib")
+        self.file("release/.fingerprint/tauri-" + "a" * 16 + "/lib-tauri.json",
+                  b'{"rustc":1,"deps":[],"local":[]}')
+        report = cache.check(self.root)
+        self.assertFalse(report["audit"]["cleanup_allowed"])
+        self.assertEqual(report["audit"]["reclaimable"]["entries"], [])
+        self.assertIn(old.relative_to(self.target).as_posix(), report["audit"]["pending"]["entries"])
+        self.assertTrue(old.is_file())
+
+
+    # 旧 own-only 格式即使三阶段标完整也不能触发全依赖清扫。
+    def test_legacy_reference_schema_cannot_promote_success(self):
+        cache.prepare(self.root)
+        state_path = self.target / cache.STATE_DIR / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        entry = state["runs"]["1:1"]
+        entry["stages"] = {stage:{"complete":True} for stage in cache.STAGES}
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            cache.finish(self.root, "success")
+
+    # 明确的原生搜索路径可以引用另一个 Cargo build 单元，必须保护整单元。
+    def test_native_linked_path_protects_cross_build_unit(self):
+        cache.prepare(self.root)
+        own = self.file("release/deps/libmsk104master_lib-" + "a" * 16 + ".rlib")
+        out = self.file("release/build/msk104master-" + "b" * 16 + "/out/current.rs")
+        native = self.file("x86_64-pc-windows-msvc/release/build/native_sys-" + "c" * 16 + "/out/x64/native.lib")
+        extra = [{"reason":"build-script-executed", "package_id":"path+file:///fixture#msk104master@0.1.0",
+                  "out_dir":str(out.parent), "linked_paths":["native=" + str(native.parent)]}]
+        report = cache.record(self.root, "test", [self.log([own], extra=extra)])
+        self.assertTrue(report["complete"])
+        self.assertIn(native.parent.parent.parent.relative_to(self.target).as_posix(), report["artifacts"])
+        broad = {**extra[0], "linked_paths":["native=" + str(self.target / "release/deps")]}
+        self.assertFalse(cache.record(self.root, "test", [self.log([own], extra=[broad])])["complete"])
 
 
 if __name__ == "__main__":

@@ -33,7 +33,6 @@ windows-ci:
     PYTHONUTF8: "1"
     RUST_TOOLCHAIN: "1.97.1"
     MASTER_CARGO_MIN_FREE_GIB: "10"
-    MASTER_CARGO_MAX_CACHE_GIB: "20"
   before_script:
     - '$ErrorActionPreference = "Stop"'
     - if ($env:RUNNER_ENV_PATH) { . $env:RUNNER_ENV_PATH }
