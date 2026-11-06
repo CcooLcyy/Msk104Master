@@ -1,4 +1,9 @@
-//! IEC104 主站核心。当前仅定义配置边界，不建立协议连接。
+//! 独立 IEC104 主站核心：配置校验、报文编解码与显式驱动的 TCP 会话。
+//!
+//! 桌面应用尚未接入此会话；配置校验自身不产生网络副作用。
+
+pub mod session;
+pub mod wire;
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
