@@ -8,7 +8,8 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
-    "build": "tsc --noEmit && vite build",
+    "build": "npm run test:update && tsc --noEmit && vite build",
+    "test:update": "node --experimental-strip-types --test tests/updateController.test.ts",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri"
   },
