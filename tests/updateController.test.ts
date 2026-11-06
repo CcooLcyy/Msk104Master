@@ -14,6 +14,9 @@ function deferred<T>() {
 
 function setup(t: TestContext, check = async (): Promise<UpdateInfo | null> => null,
   install = async (): Promise<void> => {}) {
+  // 中文日志通过诊断事件输出，规避 Node 22 测试运行器的 stdout 反序列化缺陷。
+  t.mock.method(console, "info", (message: unknown) => t.diagnostic(String(message)));
+  t.mock.method(console, "warn", (message: unknown) => t.diagnostic(String(message)));
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const commands = { check: t.mock.fn(check), install: t.mock.fn(install) };
   const changes: UpdateViewState[] = [];
