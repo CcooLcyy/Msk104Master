@@ -63,13 +63,42 @@ try {
         }
     }
 
+    if ($env:ALLOW_LOCKFILE_BOOTSTRAP -eq '1') {
+        Write-Host '按显式 CI 引导请求刷新 Cargo.lock，完成后须回收提交'
+        Invoke-Checked 'cargo' @('generate-lockfile')
+    }
+    Invoke-Checked 'python' @('-B', '-m', 'unittest', 'discover', '-s', 'scripts/ci', '-p', 'test_*.py', '-v')
     Invoke-Checked 'npm.cmd' @('ci', '--no-audit', '--no-fund')
     # 先生成内嵌前端资源，再检查包含 Tauri 上下文宏的 Rust 桌面工程。
     Invoke-Checked 'npm.cmd' @('run', 'build')
     Invoke-Checked 'cargo' @('fmt', '--all', '--', '--check')
     Invoke-Checked 'cargo' @('clippy', '--workspace', '--all-targets', '--locked', '--', '-D', 'warnings')
     Invoke-Checked 'cargo' @('test', '--workspace', '--locked')
-    Invoke-Checked 'npm.cmd' @('run', 'tauri', '--', 'build', '--no-bundle', '--ci', '--', '--locked')
+    $signed = $env:CI_COMMIT_BRANCH -eq 'main' -and $env:CI_COMMIT_REF_PROTECTED -eq 'true' -and $env:CI_PIPELINE_SOURCE -in @('push', 'web')
+    if ($signed -and -not $env:TAURI_SIGNING_PRIVATE_KEY) { throw '缺少 Tauri 更新签名私钥，停止发布构建' }
+    if ($env:CI_PIPELINE_IID -notmatch '^[1-9][0-9]*$') { throw '流水线版本序号无效' }
+    $baseVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+    $version = "$baseVersion-ci.$($env:CI_PIPELINE_IID)"
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $override = @{ version = $version; bundle = @{ createUpdaterArtifacts = $signed } }
+    [IO.File]::WriteAllText((Join-Path $root 'package/tauri-ci.json'), ($override | ConvertTo-Json -Depth 5), $utf8)
+    # 独立作业目录只删除旧安装包，防止缓存产物被误归档。
+    $bundle = Join-Path $env:CARGO_TARGET_DIR 'release/bundle/nsis'
+    if (Test-Path -LiteralPath $bundle) {
+        Get-ChildItem -LiteralPath $bundle -File | Where-Object { $_.Name -match '\.exe(\.sig)?$' } | Remove-Item
+    }
+    # 显式传递空密码，避免 PowerShell 删除空值环境变量后签名器等待交互。
+    $tauriCommand = 'const {spawnSync}=require("child_process");const r=spawnSync(process.execPath,["node_modules/@tauri-apps/cli/tauri.js",...process.argv.slice(1)],{stdio:"inherit",env:{...process.env,TAURI_SIGNING_PRIVATE_KEY_PASSWORD:process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD??""}});if(r.error)throw r.error;process.exit(r.status??1);'
+    Invoke-Checked 'node' @('-e', $tauriCommand, 'build', '--bundles', 'nsis', '--ci', '--config', 'package/tauri-ci.json', '--', '--locked')
+    $installers = @(Get-ChildItem -LiteralPath $bundle -File -Filter '*.exe')
+    if ($installers.Count -ne 1) { throw '构建结果必须包含一个 Windows NSIS 安装包' }
+    New-Item -ItemType Directory -Path package/installer -Force | Out-Null
+    Copy-Item -LiteralPath $installers[0].FullName -Destination package/installer/
+    if ($signed) {
+        $signature = $installers[0].FullName + '.sig'
+        if (-not (Test-Path -LiteralPath $signature -PathType Leaf)) { throw '安装包缺少更新签名' }
+        Copy-Item -LiteralPath $signature -Destination package/installer/
+    }
 
     $executable = Join-Path $env:CARGO_TARGET_DIR 'release/msk104master.exe'
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
@@ -78,8 +107,16 @@ try {
     Copy-Item -LiteralPath $executable -Destination package/msk104master.exe
     $utf8 = [Text.UTF8Encoding]::new($false)
     $hash = (Get-FileHash -LiteralPath package/msk104master.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-    [IO.File]::WriteAllText((Join-Path $root 'package/SHA256SUMS.txt'), "$hash  msk104master.exe`n", $utf8)
+    $checksums = @("$hash  msk104master.exe")
+    foreach ($asset in (Get-ChildItem package/installer -File)) {
+        $assetHash = (Get-FileHash -LiteralPath $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $checksums += "$assetHash  installer/$($asset.Name)"
+    }
+    [IO.File]::WriteAllText((Join-Path $root 'package/SHA256SUMS.txt'), (($checksums -join "`n") + "`n"), $utf8)
     $info = [ordered]@{
+        version = $version
+        signed = $signed
+        installer = $installers[0].Name
         commit = $env:CI_COMMIT_SHA
         ref = $env:CI_COMMIT_REF_NAME
         pipeline = $env:CI_PIPELINE_URL
@@ -90,7 +127,7 @@ try {
         sha256 = $hash
     }
     [IO.File]::WriteAllText((Join-Path $root 'package/build-info.json'), (($info | ConvertTo-Json) + "`n"), $utf8)
-    Write-Host '主站检查与 Windows 可执行文件构建完成；产物仅归档，不发布更新渠道'
+    Write-Host '主站检查与 Windows NSIS 安装包构建完成，受保护 main 的签名产物将进入 R2 发布阶段'
 } finally {
     Stop-Transcript
 }

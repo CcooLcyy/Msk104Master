@@ -19,3 +19,5 @@ serde.workspace = true
 tauri = { version = "~2.12.5", features = [] }
 tauri-plugin-log = "2"
 log = "0.4"
+tauri-plugin-updater = "2"
+tokio = { version = "1", features = ["sync"] }

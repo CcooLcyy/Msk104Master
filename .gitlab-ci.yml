@@ -8,11 +8,19 @@ workflow:
     - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE =~ /^(push|web)$/'
     - when: never
 
-stages: [verify-build]
+stages: [verify-build, publish]
+
+variables:
+  R2_BUCKET: mskdsp-update
+  R2_PREFIX: msk104master
+  R2_PUBLIC_BASE_URL: https://pub-19f3d71852b04011b120b1b814141c12.r2.dev
 
 windows-ci:
   stage: verify-build
   tags: [windows, amd64, shell]
+  environment:
+    name: ci
+    action: prepare
   timeout: 2h
   interruptible: true
   variables:
@@ -34,6 +42,32 @@ windows-ci:
       - package/logs/
       - package/build-info.json
       - package/msk104master.exe
+      - package/installer/
       - package/SHA256SUMS.txt
       - package-lock.json
       - Cargo.lock
+
+publish-r2:
+  stage: publish
+  image:
+    name: mskdsp-platform-ci-tools:bookworm-v2
+    pull_policy: if-not-present
+  tags: [linux, amd64, docker]
+  timeout: 20 minutes
+  interruptible: false
+  resource_group: msk104master-r2-ci
+  environment:
+    name: ci
+  needs:
+    - job: windows-ci
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - when: never
+  script:
+    - python3 scripts/ci/publish_r2.py
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - package/latest.json

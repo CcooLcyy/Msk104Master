@@ -1,3 +1,4 @@
+import UpdatePanel from "./UpdatePanel";
 import { useEffect, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -102,6 +103,7 @@ export default function App() {
           <span className="foundation-label">工程骨架</span>
           <p>协议通信尚未实现</p>
           <span className="version">{info ? `v${info.version}` : "版本待读取"}</span>
+          <UpdatePanel />
         </div>
       </aside>
 

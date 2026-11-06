@@ -110,3 +110,8 @@ td { padding: 0; }
   .field-row { grid-template-columns: minmax(0, 1fr); }
   .panel-heading, form, .command-body { padding: 18px; }
 }
+
+.update-panel { margin-top: 14px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.update-panel p { margin: 10px 0; }
+.update-panel .update-error { color: #b42318; }
+.update-panel .update-notes { white-space: pre-wrap; max-height: 120px; overflow-y: auto; }

@@ -21,7 +21,7 @@ docs/               设计与验收边界
 - [GitLab 项目](http://192.168.10.198:8929/mskdsp/msk104master)，默认分支 `main`。
 - [流水线](http://192.168.10.198:8929/mskdsp/msk104master/-/pipelines)：复用现有 Windows x64 Shell Runner，标签 `windows / amd64 / shell`。
 - 执行前端类型检查与构建、Rust 格式检查、Clippy、workspace 单元测试，以及 Tauri Windows 发布构建。
-- CI 保存 Windows 可执行文件、构建记录及依赖锁文件；当前不制作安装包，不发布更新或 Stable/Beta 版本。
+- CI 保存 Windows x64 NSIS 安装包、可执行文件、构建记录与签名；受保护 main 成功构建后发布 R2 测试通道。
 - 本地不主动构建、测试或安装环境；相关校验统一通过对应提交的 CI 执行。
 
 依赖由 `package-lock.json` 和根目录 `Cargo.lock` 锁定。首次引导流水线生成锁文件后回收提交；后续 CI 使用 `npm ci` 和 Cargo `--locked`。
@@ -33,3 +33,11 @@ docs/               设计与验收边界
 下一步先确定协议库及许可、链路状态机、总召和控制命令的验收标准，再实现协议收发与自动化服务。详见 [工程设计](docs/工程设计.md)。
 
 Tauri 配置与平台依赖参考官方 [配置说明](https://v2.tauri.app/reference/config/) 和 [前置条件](https://v2.tauri.app/start/prerequisites/)。
+
+## 安装与更新
+
+在成功流水线的产物中下载 `package/installer/` 下的 NSIS 安装器，运行安装后打开主站。主站侧栏提供“检查更新”，发现新版本后可“下载并安装更新”；安装前校验签名，Windows 安装器会关闭应用并完成升级。
+
+R2 使用与 slaveSim 相同的存储桶，独立更新地址为 [主站 CI 更新清单](https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/msk104master/ci/latest.json)。该通道用于持续交付，尚未设立 Stable 通道。
+
+详见 [安装与更新](docs/安装与更新.md) 和 [验收范围](docs/安装与更新验收.md)。CI 成功不等于已经完成人工安装、卸载和跨版本升级验收。
