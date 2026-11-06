@@ -1,0 +1,151 @@
+name: Windows CI 与 R2 发布
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+  RUST_TOOLCHAIN: '1.97.1'
+  MASTER_CARGO_MIN_FREE_GIB: '10'
+  CI_PROJECT_ID: ${{ github.repository_id }}
+  CI_PIPELINE_ID: ${{ github.run_id }}
+  CI_PIPELINE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  CI_COMMIT_SHA: ${{ github.sha }}
+  CI_COMMIT_REF_NAME: ${{ github.ref_name }}
+  CI_COMMIT_BRANCH: ${{ github.ref_type == 'branch' && github.ref_name || '' }}
+  CI_PIPELINE_SOURCE: ${{ github.event_name == 'workflow_dispatch' && 'web' || github.event_name }}
+  R2_PUBLISH_ENABLED: ${{ vars.R2_PUBLISH_ENABLED }}
+  # 兼容原脚本的发布标志；真实权限边界由仓库、事件、分支与 ci 环境共同限定。
+  CI_COMMIT_REF_PROTECTED: ${{ github.repository == 'CcooLcyy/Msk104Master' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.R2_PUBLISH_ENABLED == 'true' && 'true' || 'false' }}
+
+jobs:
+  windows:
+    name: Windows 检查与安装包
+    runs-on: windows-2022
+    timeout-minutes: 120
+    environment: ${{ github.repository == 'CcooLcyy/Msk104Master' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.R2_PUBLISH_ENABLED == 'true' && 'ci' || 'checks' }}
+    concurrency:
+      group: windows-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      version_sequence: ${{ steps.prepare.outputs.version_sequence }}
+      artifact_name: ${{ steps.prepare.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: 定位 MSVC 并生成连续版本序号
+        id: prepare
+        env:
+          CI_VERSION_BASE: ${{ vars.CI_VERSION_BASE }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = $env:CI_VERSION_BASE
+          if (-not $base) {
+            if ($env:CI_COMMIT_REF_PROTECTED -eq 'true') { throw '发布前必须配置 CI_VERSION_BASE，衔接原 GitLab 版本序号' }
+            $base = '0'
+          }
+          if ($base -notmatch '^(0|[1-9][0-9]*)$') { throw 'CI_VERSION_BASE 必须是非负整数' }
+          $sequence = [long]$base + [long]$env:GITHUB_RUN_NUMBER
+          "CI_PIPELINE_IID=$sequence" >> $env:GITHUB_ENV
+          "CI_JOB_ID=windows-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_ENV
+          "CI_JOB_URL=$env:CI_PIPELINE_URL" >> $env:GITHUB_ENV
+          "version_sequence=$sequence" >> $env:GITHUB_OUTPUT
+          "artifact_name=windows-x64-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw '未找到 MSVC x64 工具链' }
+          $developerCommand = Join-Path $installation 'Common7/Tools/VsDevCmd.bat'
+          if (-not (Test-Path -LiteralPath $developerCommand -PathType Leaf)) { throw '未找到 MSVC 开发环境脚本' }
+          "VSDEVCMD=$developerCommand" >> $env:GITHUB_ENV
+          Write-Host "已准备 Windows 工具链；本次 CI 版本序号为 $sequence"
+      - name: 检查、测试、构建与更新签名
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.CI_COMMIT_REF_PROTECTED == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.CI_COMMIT_REF_PROTECTED == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: ./scripts/ci/windows.ps1
+      - name: 失败或取消时登记缓存
+        if: ${{ failure() || cancelled() }}
+        env:
+          CI_JOB_STATUS: failed
+        run: ./scripts/ci/windows.ps1 -Stage cache-finish
+      - name: 归档 Windows 安装包与构建记录
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.prepare.outputs.artifact_name }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            package/msk104master.exe
+            package/installer/
+            package/SHA256SUMS.txt
+            package/build-info.json
+      - name: 归档检查与失败日志
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: package/logs/
+
+  publish-r2:
+    name: 发布 R2 自动更新
+    needs: windows
+    if: ${{ github.repository == 'CcooLcyy/Msk104Master' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.R2_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ci
+    concurrency:
+      group: msk104master-r2-ci
+      cancel-in-progress: false
+    env:
+      CI_PIPELINE_IID: ${{ needs.windows.outputs.version_sequence }}
+      R2_BUCKET: mskdsp-update
+      R2_PREFIX: msk104master
+      R2_PUBLIC_BASE_URL: https://pub-19f3d71852b04011b120b1b814141c12.r2.dev
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.windows.outputs.artifact_name }}
+          path: package
+      - name: 验证 Linux 路径与发布边界
+        run: python3 -B -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - name: 检查 AWS CLI
+        run: aws --version
+      - name: 上传签名安装包并切换更新清单
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python3 scripts/ci/publish_r2.py
+      - name: 归档本次更新清单
+        uses: actions/upload-artifact@v6
+        with:
+          name: r2-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: error
+          path: package/latest.json

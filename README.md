@@ -16,17 +16,17 @@ docs/               设计与验收边界
 
 界面和后续自动化接口共用 Rust 核心。主站独立于 DSP 下位机、DSP 上位机和测试上位机，不依赖被测 DSP 协议实现。
 
-## GitLab 与 CI
+## GitHub Actions 与 CI
 
-- [GitLab 项目](http://192.168.10.198:8929/mskdsp/msk104master)，默认分支 `main`。
-- [流水线](http://192.168.10.198:8929/mskdsp/msk104master/-/pipelines)：复用现有 Windows x64 Shell Runner，标签 `windows / amd64 / shell`。
-- 执行前端类型检查与构建、Rust 格式检查、Clippy、workspace 单元测试，以及 Tauri Windows 发布构建。
-- CI 保存 Windows x64 NSIS 安装包、可执行文件、构建记录与签名；受保护 main 成功构建后发布 R2 测试通道。
+- [GitHub 项目](https://github.com/CcooLcyy/Msk104Master) 默认分支为 `main`；[Actions](https://github.com/CcooLcyy/Msk104Master/actions) 负责 Windows 检查、NSIS 打包和 R2 更新发布。
+- push、PR 与手动运行执行前端测试/类型检查/构建、Rust 格式、Release Clippy、workspace 测试与安装包构建；日志和交付产物保存 14 天。
+- 只有本仓库 main 的 push/手动运行且 `R2_PUBLISH_ENABLED=true` 才使用 `ci` 环境密钥签名并发布 R2。未开启发布、其他分支及 PR 只生成未签名安装包。
+- [GitLab 项目](http://192.168.10.198:8929/mskdsp/msk104master) 保留源码和未签名检查构建，R2 发布任务已删除。
 - 本地不主动构建、测试或安装环境；相关校验统一通过对应提交的 CI 执行。
 
-依赖由 `package-lock.json` 和根目录 `Cargo.lock` 锁定。首次引导流水线生成锁文件后回收提交；后续 CI 使用 `npm ci` 和 Cargo `--locked`。
+首次迁移需要配置 GitHub 环境 Secrets 与版本基数，详见 [GitHub Actions 流程与配置](docs/GitHub-Actions.md)。依赖由 `package-lock.json` 和根目录 `Cargo.lock` 锁定，日常使用 `npm ci` 与 Cargo `--locked`。
 
-Windows CI 的检查、测试和打包统一使用 x64 Release；缓存按实际构建引用保留，不设置大小上限。完整成功后回收确认不再使用的历史产物，失败时保护上次成功所需的缓存，并归档引用、冗余与磁盘可用空间报告。GitLab 产物的 14 天有效期与 Runner 缓存回收分别管理，详见 [CI 缓存治理](docs/CI缓存治理.md)。
+Windows 检查、测试和打包统一使用 x64 Release；GitHub 使用独立托管 Runner，不恢复整个 target，仍保留引用登记和磁盘检查。原持久 Runner 缓存规则见 [CI 缓存治理](docs/CI缓存治理.md)。
 
 ## 后续开发入口
 

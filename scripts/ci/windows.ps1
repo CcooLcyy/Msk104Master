@@ -168,7 +168,8 @@ try {
     Invoke-Checked 'cargo' @('fmt', '--all', '--', '--check')
     Invoke-CargoStep 'cargo' @('clippy', '--release', '--workspace', '--all-targets', '--features', 'msk104master/custom-protocol', '--target', 'x86_64-pc-windows-msvc', '--locked', '--message-format=json-render-diagnostics', '--', '-D', 'warnings') 'clippy'
     Invoke-CargoStep 'cargo' @('test', '--release', '--workspace', '--features', 'msk104master/custom-protocol', '--target', 'x86_64-pc-windows-msvc', '--locked', '--message-format=json-render-diagnostics') 'test'
-    $signed = $env:CI_COMMIT_BRANCH -eq 'main' -and $env:CI_COMMIT_REF_PROTECTED -eq 'true' -and $env:CI_PIPELINE_SOURCE -in @('push', 'web')
+    # 签名发布已迁至 GitHub；GitLab 保留未签名构建，不能继续写入同一更新通道。
+    $signed = $env:GITHUB_ACTIONS -eq 'true' -and $env:GITHUB_REPOSITORY -eq 'CcooLcyy/Msk104Master' -and $env:GITHUB_REF -eq 'refs/heads/main' -and $env:GITHUB_EVENT_NAME -in @('push', 'workflow_dispatch') -and $env:R2_PUBLISH_ENABLED -eq 'true' -and $env:CI_COMMIT_BRANCH -eq 'main' -and $env:CI_COMMIT_REF_PROTECTED -eq 'true' -and $env:CI_PIPELINE_SOURCE -in @('push', 'web')
     if ($signed -and -not $env:TAURI_SIGNING_PRIVATE_KEY) { throw '缺少 Tauri 更新签名私钥，停止发布构建' }
     if ($env:CI_PIPELINE_IID -notmatch '^[1-9][0-9]*$') { throw '流水线版本序号无效' }
     $baseVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
@@ -230,7 +231,7 @@ try {
     # 磁盘空间检查失败不能推进成功历史；全部产物归档成功后才按引用回收。
     Invoke-Cache 'check' 'after-build'
     Invoke-Cache 'finish' 'success' @('--status', 'success')
-    Write-Host '主站检查与 Windows NSIS 安装包构建完成，受保护 main 的签名产物将进入 R2 发布阶段'
+    Write-Host "主站检查与 Windows NSIS 安装包构建完成；本次更新签名状态：$signed"
 } catch {
     $buildFailure = $_
     try {

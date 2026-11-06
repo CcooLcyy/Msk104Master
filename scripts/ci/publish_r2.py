@@ -19,7 +19,20 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def artifact_root(version, name, checksums):
+    # 签名或安装包变化时使用新目录，避免同版本重跑覆盖 immutable 下载地址。
+    fingerprint = hashlib.sha256((checksums["installer/" + name]
+                                  + checksums["installer/" + name + ".sig"]).encode("ascii")).hexdigest()
+    return PREFIX + "/ci/" + version + "/" + fingerprint
+
+
 def validate_policy(env):
+    if (env.get("GITHUB_ACTIONS") != "true"
+            or env.get("GITHUB_REPOSITORY") != "CcooLcyy/Msk104Master"
+            or env.get("GITHUB_REF") != "refs/heads/main"
+            or env.get("GITHUB_EVENT_NAME") not in ("push", "workflow_dispatch")
+            or env.get("R2_PUBLISH_ENABLED") != "true"):
+        raise ValueError("仅允许已启用发布的 Msk104Master GitHub main 推送或手动工作流发布")
     if (env.get("CI_COMMIT_BRANCH") != "main"
             or env.get("CI_COMMIT_REF_PROTECTED") != "true"
             or env.get("CI_PIPELINE_SOURCE") not in ("push", "web")):
@@ -59,18 +72,27 @@ def validate_inputs(folder, env):
 
 def current_head(env):
     # 不向日志写入请求头或凭据。
-    # JOB-TOKEN 仅授权分支列表接口，不支持单个分支查询。
-    url = (env["CI_API_V4_URL"] + "/projects/" + env["CI_PROJECT_ID"]
-           + "/repository/branches?search=%5Emain%24&per_page=100")
-    request = Request(url, headers={"JOB-TOKEN": env["CI_JOB_TOKEN"]})
+    token = env.get("GH_TOKEN", "")
+    if not token.strip():
+        raise ValueError("缺少 GH_TOKEN，无法核对 main 当前提交")
+    expected_sha = env.get("CI_COMMIT_SHA", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+        raise ValueError("本次提交 SHA 无效")
+    # 固定可信 API 地址，避免自定义环境变量将 token 发送到其他主机。
+    request = Request("https://api.github.com/repos/CcooLcyy/Msk104Master/git/ref/heads/main",
+                      headers={"Authorization": "Bearer " + token,
+                               "Accept": "application/vnd.github+json",
+                               "X-GitHub-Api-Version": "2022-11-28",
+                               "User-Agent": "msk104master-publisher/1"})
     with urlopen(request, timeout=60) as response:
         data = json.load(response)
-    if not isinstance(data, list):
-        raise ValueError("GitLab 分支列表响应格式无效")
-    branches = [branch for branch in data if branch.get("name") == "main"]
-    if len(branches) != 1:
-        raise ValueError("无法唯一确认 main 分支，拒绝发布")
-    if branches[0].get("commit", {}).get("id") != env["CI_COMMIT_SHA"]:
+    if (not isinstance(data, dict) or data.get("ref") != "refs/heads/main"
+            or not isinstance(data.get("object"), dict)
+            or data["object"].get("type") != "commit"
+            or not isinstance(data["object"].get("sha"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", data["object"]["sha"])):
+        raise ValueError("GitHub main 引用响应格式无效")
+    if data["object"]["sha"] != expected_sha:
         raise ValueError("main 已前进，拒绝过期提交覆盖更新清单")
 
 
@@ -119,13 +141,13 @@ def main():
 
     current_head(env)
     channel = PREFIX + "/ci"
-    root = channel + "/" + data["version"]
     name = data["installer"]
+    root = artifact_root(data["version"], name, checksums)
     signature = (folder / "installer" / (name + ".sig")).read_text(encoding="utf-8").strip()
     manifest = dict(version=data["version"], notes="IEC104 模拟主站 CI 更新；提交 " + data["commit"][:12],
                     pub_date=data["built_at"], commit=data["commit"], pipeline_iid=int(env["CI_PIPELINE_IID"]),
                     platforms={"windows-x86_64": dict(signature=signature, url=BASE + "/" + root + "/" + quote(name))})
-    # 同一提交重跑也不能让旧流水线回滚较新版本；资源组使检查和切换串行。
+    # 同一提交重跑也不能让旧流水线回滚较新版本；工作流并发组使检查和切换串行。
     existing = folder / "previous-latest.json"
     objects = list_objects(account, bucket, channel, publish_env)
     if any(item.get("Key") == channel + "/latest.json" for item in objects):
