@@ -26,6 +26,8 @@ docs/               设计与验收边界
 
 依赖由 `package-lock.json` 和根目录 `Cargo.lock` 锁定。首次引导流水线生成锁文件后回收提交；后续 CI 使用 `npm ci` 和 Cargo `--locked`。
 
+Windows CI 的检查、测试和打包统一使用 x64 Release；缓存按本项目的构建记录回收，保护最近两次成功引用的自有产物。构建前后检查缓存预算和可用空间，失败时归档具体原因。GitLab 产物的 14 天有效期与 Runner 缓存回收分别管理，详见 [CI 缓存治理](docs/CI缓存治理.md)。
+
 ## 后续开发入口
 
 在开发环境获得授权并具备 Node.js、Rust、Windows C++ Build Tools 与 WebView2 后，Tauri 开发入口为 `npm run tauri -- dev`。工程常用脚本是 `npm run build` 和 `npm run tauri -- build --no-bundle`；默认由 CI 调用。
