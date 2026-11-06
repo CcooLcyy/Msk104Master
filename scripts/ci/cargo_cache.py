@@ -18,7 +18,8 @@ STAGES = ("clippy", "test", "package")
 PACKAGES = {"src-tauri/Cargo.toml": "msk104master", "crates/iec104-core/Cargo.toml": "iec104-core"}
 OWN_HASH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*-[a-f0-9]{16}\Z")
 OWN_FILE = re.compile(r"(?:lib)?[A-Za-z0-9_]+-[a-f0-9]{16}(?:\.[A-Za-z0-9_-]+)+\Z")
-OWN_TARGETS = {"msk104master", "msk104master_lib", "iec104_core", "build_script_build"}
+# 包身份与路径检查保持不变；显式纳入协议核心新增的两个集成测试目标。
+OWN_TARGETS = {"msk104master", "msk104master_lib", "iec104_core", "build_script_build", "wire", "session"}
 
 
 class CapacityError(ValueError):

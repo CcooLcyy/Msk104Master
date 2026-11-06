@@ -227,6 +227,24 @@ class CargoCacheTests(unittest.TestCase):
         self.assertTrue(external.is_file())
         self.assertTrue(dependency.is_file())
 
+    # 协议集成测试的检查及可执行产物可登记，未知目标仍须拒绝。
+    def test_records_protocol_test_targets_and_rejects_unknown_target(self):
+        cache.prepare(self.root)
+        for name in ("wire", "session"):
+            paths = [self.file("release/deps/" + name + "-" + "a" * 16 + extension)
+                     for extension in (".rmeta", ".exe")]
+            log = self.log(paths, package="iec104-core")
+            messages = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            messages[0]["target"] = {"name": name, "kind": ["test"]}
+            log.write_text("\n".join(json.dumps(item) for item in messages) + "\n", encoding="utf-8")
+            report = cache.record(self.root, "clippy", [log])
+            for path in paths:
+                self.assertIn(path.relative_to(self.target).as_posix(), report["artifacts"])
+        messages[0]["target"]["name"] = "unknown_protocol_target"
+        log.write_text("\n".join(json.dumps(item) for item in messages) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "未知的编译目标"):
+            cache.record(self.root, "clippy", [log])
+
     # build-script 输出目录与 fingerprint 一并登记，维持整单元引用。
     def test_records_owned_build_script_units(self):
         cache.prepare(self.root)
