@@ -15,7 +15,7 @@ class ReleaseTests(unittest.TestCase):
     # 首次发布不存在旧清单时也必须显式请求 JSON，不受 Runner 的 CLI 默认格式影响。
     def test_empty_object_listing_requests_json(self):
         def run(command, **options):
-            output = '{"KeyCount": 0}' if command[-2:] == ["--output", "json"] else ""
+            output = '{"KeyCount": 0}' if command[-2:] == ["--output", "json"] and "--no-paginate" in command else ""
             return SimpleNamespace(stdout=output)
         with patch("publish_r2.subprocess.run", side_effect=run):
             self.assertEqual(list_objects("a" * 32, "mskdsp-update", "msk104master/ci", {}), [])

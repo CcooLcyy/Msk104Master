@@ -83,7 +83,7 @@ def public_digest(url):
 def list_objects(account, bucket, channel, publish_env):
     result = subprocess.run(["aws", "--endpoint-url", f"https://{account}.r2.cloudflarestorage.com",
                              "s3api", "list-objects-v2", "--bucket", bucket,
-                             "--prefix", channel + "/latest.json", "--output", "json"],
+                             "--prefix", channel + "/latest.json", "--no-paginate", "--output", "json"],
                             env=publish_env, check=True, capture_output=True, text=True)
     data = json.loads(result.stdout)
     objects = data.get("Contents", []) if isinstance(data, dict) else None
