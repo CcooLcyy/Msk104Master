@@ -72,6 +72,8 @@ publish-r2:
     - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
     - when: never
   script:
+    # Linux 账号可创建符号链接，补足 Windows Runner 权限导致的链接边界覆盖缺口。
+    - python3 -B -m unittest discover -s scripts/ci -p 'test_*.py' -v
     - python3 scripts/ci/publish_r2.py
   artifacts:
     when: always

@@ -6,11 +6,27 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
-from publish_r2 import current_head, validate_inputs, validate_policy
+from publish_r2 import current_head, list_objects, validate_inputs, validate_policy
 
 
 class ReleaseTests(unittest.TestCase):
+    # 首次发布不存在旧清单时也必须显式请求 JSON，不受 Runner 的 CLI 默认格式影响。
+    def test_empty_object_listing_requests_json(self):
+        def run(command, **options):
+            output = '{"KeyCount": 0}' if command[-2:] == ["--output", "json"] else ""
+            return SimpleNamespace(stdout=output)
+        with patch("publish_r2.subprocess.run", side_effect=run):
+            self.assertEqual(list_objects("a" * 32, "mskdsp-update", "msk104master/ci", {}), [])
+
+    # 非法对象列表不能被当成首次发布而忽略已有版本保护。
+    def test_invalid_object_listing_is_rejected(self):
+        for value in ('[]', '{"Contents": null}', '{"Contents": ["invalid"]}'):
+            with self.subTest(value=value), patch("publish_r2.subprocess.run", return_value=SimpleNamespace(stdout=value)):
+                with self.assertRaises(ValueError):
+                    list_objects("a" * 32, "mskdsp-update", "msk104master/ci", {})
+
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)

@@ -80,6 +80,18 @@ def public_digest(url):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def list_objects(account, bucket, channel, publish_env):
+    result = subprocess.run(["aws", "--endpoint-url", f"https://{account}.r2.cloudflarestorage.com",
+                             "s3api", "list-objects-v2", "--bucket", bucket,
+                             "--prefix", channel + "/latest.json", "--output", "json"],
+                            env=publish_env, check=True, capture_output=True, text=True)
+    data = json.loads(result.stdout)
+    objects = data.get("Contents", []) if isinstance(data, dict) else None
+    if not isinstance(objects, list) or any(not isinstance(item, dict) for item in objects):
+        raise ValueError("R2 对象列表响应格式无效")
+    return objects
+
+
 def main():
     env = dict(os.environ)
     validate_policy(env)
@@ -115,10 +127,7 @@ def main():
                     platforms={"windows-x86_64": dict(signature=signature, url=BASE + "/" + root + "/" + quote(name))})
     # 同一提交重跑也不能让旧流水线回滚较新版本；资源组使检查和切换串行。
     existing = folder / "previous-latest.json"
-    result = subprocess.run(["aws", "--endpoint-url", f"https://{account}.r2.cloudflarestorage.com",
-                             "s3api", "list-objects-v2", "--bucket", bucket, "--prefix", channel + "/latest.json"],
-                            env=publish_env, check=True, capture_output=True, text=True)
-    objects = json.loads(result.stdout).get("Contents", [])
+    objects = list_objects(account, bucket, channel, publish_env)
     if any(item.get("Key") == channel + "/latest.json" for item in objects):
         subprocess.run(["aws", "--endpoint-url", f"https://{account}.r2.cloudflarestorage.com",
                         "s3", "cp", f"s3://{bucket}/{channel}/latest.json", str(existing), "--only-show-errors"],

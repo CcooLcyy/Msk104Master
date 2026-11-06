@@ -13,6 +13,9 @@ crate-type = ["lib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 iec104-core = { path = "../crates/iec104-core" }
 serde.workspace = true

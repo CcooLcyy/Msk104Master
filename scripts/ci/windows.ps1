@@ -138,8 +138,8 @@ try {
     # 先生成内嵌前端资源，再检查包含 Tauri 上下文宏的 Rust 桌面工程。
     Invoke-Checked 'npm.cmd' @('run', 'build')
     Invoke-Checked 'cargo' @('fmt', '--all', '--', '--check')
-    Invoke-CargoStep 'cargo' @('clippy', '--release', '--workspace', '--all-targets', '--target', 'x86_64-pc-windows-msvc', '--locked', '--message-format=json-render-diagnostics', '--', '-D', 'warnings') 'clippy'
-    Invoke-CargoStep 'cargo' @('test', '--release', '--workspace', '--target', 'x86_64-pc-windows-msvc', '--locked', '--message-format=json-render-diagnostics') 'test'
+    Invoke-CargoStep 'cargo' @('clippy', '--release', '--workspace', '--all-targets', '--features', 'msk104master/custom-protocol', '--target', 'x86_64-pc-windows-msvc', '--locked', '--message-format=json-render-diagnostics', '--', '-D', 'warnings') 'clippy'
+    Invoke-CargoStep 'cargo' @('test', '--release', '--workspace', '--features', 'msk104master/custom-protocol', '--target', 'x86_64-pc-windows-msvc', '--locked', '--message-format=json-render-diagnostics') 'test'
     $signed = $env:CI_COMMIT_BRANCH -eq 'main' -and $env:CI_COMMIT_REF_PROTECTED -eq 'true' -and $env:CI_PIPELINE_SOURCE -in @('push', 'web')
     if ($signed -and -not $env:TAURI_SIGNING_PRIVATE_KEY) { throw '缺少 Tauri 更新签名私钥，停止发布构建' }
     if ($env:CI_PIPELINE_IID -notmatch '^[1-9][0-9]*$') { throw '流水线版本序号无效' }
@@ -155,7 +155,7 @@ try {
     }
     # 显式传递空密码，避免 PowerShell 删除空值环境变量后签名器等待交互。
     $tauriCommand = 'const {spawnSync}=require("child_process");const r=spawnSync(process.execPath,["node_modules/@tauri-apps/cli/tauri.js",...process.argv.slice(1)],{stdio:"inherit",env:{...process.env,TAURI_SIGNING_PRIVATE_KEY_PASSWORD:process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD??""}});if(r.error)throw r.error;process.exit(r.status??1);'
-    Invoke-CargoStep 'node' @('-e', $tauriCommand, 'build', '--bundles', 'nsis', '--target', 'x86_64-pc-windows-msvc', '--ci', '--config', 'package/tauri-ci.json', '--', '--locked', '--message-format=json-render-diagnostics') 'package'
+    Invoke-CargoStep 'node' @('-e', $tauriCommand, 'build', '--bundles', 'nsis', '--features', 'custom-protocol', '--target', 'x86_64-pc-windows-msvc', '--ci', '--config', 'package/tauri-ci.json', '--', '--locked', '--message-format=json-render-diagnostics') 'package'
     $installers = @(Get-ChildItem -LiteralPath $bundle -File -Filter '*.exe')
     if ($installers.Count -ne 1) { throw '构建结果必须包含一个 Windows NSIS 安装包' }
     New-Item -ItemType Directory -Path package/installer -Force | Out-Null
