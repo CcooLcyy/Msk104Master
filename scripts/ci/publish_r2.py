@@ -59,11 +59,18 @@ def validate_inputs(folder, env):
 
 def current_head(env):
     # 不向日志写入请求头或凭据。
-    url = env["CI_API_V4_URL"] + "/projects/" + env["CI_PROJECT_ID"] + "/repository/branches/main"
+    # JOB-TOKEN 仅授权分支列表接口，不支持单个分支查询。
+    url = (env["CI_API_V4_URL"] + "/projects/" + env["CI_PROJECT_ID"]
+           + "/repository/branches?search=%5Emain%24&per_page=100")
     request = Request(url, headers={"JOB-TOKEN": env["CI_JOB_TOKEN"]})
     with urlopen(request, timeout=60) as response:
         data = json.load(response)
-    if data["commit"]["id"] != env["CI_COMMIT_SHA"]:
+    if not isinstance(data, list):
+        raise ValueError("GitLab 分支列表响应格式无效")
+    branches = [branch for branch in data if branch.get("name") == "main"]
+    if len(branches) != 1:
+        raise ValueError("无法唯一确认 main 分支，拒绝发布")
+    if branches[0].get("commit", {}).get("id") != env["CI_COMMIT_SHA"]:
         raise ValueError("main 已前进，拒绝过期提交覆盖更新清单")
 
 

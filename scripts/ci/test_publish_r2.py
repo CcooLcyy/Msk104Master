@@ -1,11 +1,13 @@
 import copy
 import hashlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from publish_r2 import validate_inputs, validate_policy
+from publish_r2 import current_head, validate_inputs, validate_policy
 
 
 class ReleaseTests(unittest.TestCase):
@@ -56,6 +58,33 @@ class ReleaseTests(unittest.TestCase):
             self.save()
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_inputs(self.root, self.env)
+
+    # JOB-TOKEN 只请求授权的分支列表接口，精确匹配 main 当前提交。
+    def test_current_head_matches_main(self):
+        env = dict(self.env, CI_API_V4_URL="https://gitlab.example/api/v4",
+                   CI_PROJECT_ID="11", CI_JOB_TOKEN="test-token")
+        response = io.BytesIO(json.dumps([
+            {"name": "main-backup", "commit": {"id": "b" * 40}},
+            {"name": "main", "commit": {"id": self.env["CI_COMMIT_SHA"]}},
+        ]).encode())
+        with patch("publish_r2.urlopen", return_value=response) as request:
+            current_head(env)
+        self.assertEqual(request.call_args.args[0].full_url,
+                         "https://gitlab.example/api/v4/projects/11/repository/branches?search=%5Emain%24&per_page=100")
+        self.assertEqual(request.call_args.args[0].get_header("Job-token"), "test-token")
+
+    # main 已前进、缺失或响应重复时均不能覆盖更新清单。
+    def test_current_head_rejects_stale_or_missing_main(self):
+        env = dict(self.env, CI_API_V4_URL="https://gitlab.example/api/v4",
+                   CI_PROJECT_ID="11", CI_JOB_TOKEN="test-token")
+        main = {"name": "main", "commit": {"id": self.env["CI_COMMIT_SHA"]}}
+        for branches in ([{"name": "main", "commit": {"id": "b" * 40}}],
+                         [], [{"name": "main-backup", "commit": main["commit"]}],
+                         [main, main]):
+            with self.subTest(branches=branches):
+                response = io.BytesIO(json.dumps(branches).encode())
+                with patch("publish_r2.urlopen", return_value=response), self.assertRaises(ValueError):
+                    current_head(env)
 
 
 if __name__ == "__main__":
