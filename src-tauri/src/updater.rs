@@ -77,7 +77,7 @@ pub(crate) async fn check_update(
         version: update.version.clone(),
         body: update.body.clone(),
     };
-    log::info!("发现主站新版本：{}，等待用户下载安装", info.version);
+    log::info!("发现主站新版本：{}，准备自动下载安装", info.version);
     *candidate = Some(update);
     Ok(Some(info))
 }

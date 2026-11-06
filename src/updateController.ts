@@ -42,12 +42,14 @@ export function createUpdateController(commands: UpdateCommands, onChange: (stat
     } finally {
       publish({ busy: null });
     }
+    // 检查结束后立即进入安装，共用同步忙碌状态，避免定时检查或重复点击插入。
+    if (state.candidate !== null) await install();
   }
 
   async function install() {
     if (!active || state.busy !== null || state.candidate === null) return;
     publish({ busy: "installing", failed: false, message: "正在下载并校验更新，完成后将退出程序并打开安装器…" });
-    console.info("用户确认下载并安装主站更新");
+    console.info("开始下载并安装主站更新，无需确认，不等待现有连接结束");
     try {
       await commands.install();
       publish({ candidate: null, message: "已交给安装器，请完成升级" });
@@ -62,7 +64,7 @@ export function createUpdateController(commands: UpdateCommands, onChange: (stat
 
   function start() {
     active = true;
-    console.info("已启用主站自动检查更新，间隔 60 秒");
+    console.info("已启用主站自动更新，间隔 60 秒，发现新版本立即下载安装");
     // 延迟到下一个事件循环，StrictMode 立即重建 effect 时可撤销首次检查。
     const initial = setTimeout(() => void check(), 0);
     const interval = setInterval(() => void check(), 60_000);

@@ -12,7 +12,7 @@ export default function UpdatePanel() {
   useEffect(() => controller.start(), [controller]);
 
   return <section className="update-panel" aria-label="软件更新">
-    <p className="update-status">每分钟自动检查更新</p>
+    <p className="update-status">每分钟自动检查，发现新版本立即下载安装；安装会关闭程序并中断现有连接。</p>
     <button className="button secondary compact" disabled={busy !== null} onClick={() => void controller.check()}>
       {busy === "checking" ? "正在检查…" : "检查更新"}
     </button>
@@ -20,9 +20,9 @@ export default function UpdatePanel() {
     {candidate && <>
       {candidate.body && <p className="update-notes">{candidate.body}</p>}
       <p>安装将关闭当前程序，完成后重新打开。</p>
-      <button className="button primary compact" disabled={busy !== null} onClick={() => void controller.install()}>
-        {busy === "installing" ? "正在安装…" : "下载并安装更新"}
-      </button>
+      {failed && <button className="button primary compact" disabled={busy !== null} onClick={() => void controller.install()}>
+        重试下载安装
+      </button>}
     </>}
   </section>;
 }
