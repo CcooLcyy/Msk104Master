@@ -38,6 +38,10 @@ try {
     }
     # 不使用 Runner 上其他项目的 target，保证产物来源和归档位置明确。
     $env:CARGO_TARGET_DIR = Join-Path $root 'target'
+    # 检查与测试无需调试符号，降低共享 Runner 产物磁盘占用。
+    $env:CARGO_PROFILE_DEV_DEBUG = '0'
+    $env:CARGO_PROFILE_TEST_DEBUG = '0'
+    Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free | Format-Table
     # 项目独立安装检查组件，避免修改其他项目共用的 Runner 工具链。
     $env:RUSTUP_HOME = Join-Path $root '.ci-tools/rustup'
     $env:RUSTUP_TOOLCHAIN = $env:RUST_TOOLCHAIN
