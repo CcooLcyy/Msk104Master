@@ -33,10 +33,6 @@ def validate_policy(env):
             or env.get("GITHUB_EVENT_NAME") not in ("push", "workflow_dispatch")
             or env.get("R2_PUBLISH_ENABLED") != "true"):
         raise ValueError("仅允许已启用发布的 Msk104Master GitHub main 推送或手动工作流发布")
-    if (env.get("CI_COMMIT_BRANCH") != "main"
-            or env.get("CI_COMMIT_REF_PROTECTED") != "true"
-            or env.get("CI_PIPELINE_SOURCE") not in ("push", "web")):
-        raise ValueError("仅允许受保护 main 的推送或手动流水线发布")
     if env.get("R2_PREFIX", PREFIX) != PREFIX:
         raise ValueError("禁止修改其他项目的 R2 前缀")
     if env.get("R2_PUBLIC_BASE_URL", BASE).rstrip("/") != BASE:

@@ -184,7 +184,7 @@ class CargoCacheTests(unittest.TestCase):
             cache.finish(self.root, "success")
         self.assertEqual(cache.check(self.root)["successes"], [])
 
-    # GitLab 在成功收尾后取消作业时，补偿收尾不得降级已成功的缓存记录。
+    # 作业在成功收尾后取消时，补偿收尾必须保留已成功的缓存记录。
     def test_failed_replay_does_not_downgrade_success(self):
         cache.prepare(self.root)
         path = self.file("release/deps/libmsk104master_lib-" + "a" * 16 + ".rlib")
@@ -195,8 +195,8 @@ class CargoCacheTests(unittest.TestCase):
         self.assertEqual(report["successes"], ["1:1"])
         self.assertTrue(path.is_file())
 
-    # after_script 重放失败日志仅登记引用，不猜测删除部分产物。
-    def test_after_script_can_register_failed_run_for_retry(self):
+    # 收尾步骤重放失败日志时登记引用，供后续运行重试。
+    def test_failure_cleanup_can_register_failed_run_for_retry(self):
         cache.prepare(self.root)
         cache.finish(self.root, "failed")
         path = self.file("release/deps/libmsk104master_lib-" + "a" * 16 + ".rlib")

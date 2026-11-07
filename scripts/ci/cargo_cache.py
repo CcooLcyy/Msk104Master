@@ -190,7 +190,7 @@ def _cleanup(target, state, current=True, complete=False):
         _delete(target, target / relative)
     for run in expired:
         if run == _run() and state["runs"][run]["status"] == "failed":
-            # after_script 可再次重放取消前的日志；保留空登记以便幂等收尾。
+            # 收尾步骤可再次重放取消前的日志，保留空登记以便幂等处理。
             state["runs"][run]["artifacts"] = []
         else:
             del state["runs"][run]

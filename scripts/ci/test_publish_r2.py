@@ -52,8 +52,7 @@ class ReleaseTests(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         self.root = Path(self.folder.name)
         (self.root / "installer").mkdir()
-        self.env = {"CI_COMMIT_BRANCH": "main", "CI_COMMIT_REF_PROTECTED": "true",
-                    "CI_PIPELINE_SOURCE": "push", "CI_COMMIT_SHA": "a" * 40,
+        self.env = {"CI_COMMIT_SHA": "a" * 40,
                     "CI_PIPELINE_IID": "12", "CI_PIPELINE_URL": "https://ci/pipelines/12",
                     "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "CcooLcyy/Msk104Master",
                     "GITHUB_REF": "refs/heads/main", "GITHUB_EVENT_NAME": "push",
@@ -74,12 +73,11 @@ class ReleaseTests(unittest.TestCase):
             hashlib.sha256((self.root / name).read_bytes()).hexdigest() + "  " + name + "\n"
             for name in files), encoding="utf-8")
 
-    # 只允许受保护 main 的受支持来源发布。
+    # 只允许本仓库 main 的推送和手动运行发布。
     def test_policy(self):
         validate_policy(self.env)
-        validate_policy(dict(self.env, GITHUB_EVENT_NAME="workflow_dispatch", CI_PIPELINE_SOURCE="web"))
-        for key, value in (("CI_COMMIT_BRANCH", "feature"), ("CI_COMMIT_REF_PROTECTED", "false"),
-                           ("CI_PIPELINE_SOURCE", "merge_request_event"), ("R2_PREFIX", "slavesim"),
+        validate_policy(dict(self.env, GITHUB_EVENT_NAME="workflow_dispatch"))
+        for key, value in (("R2_PREFIX", "slavesim"),
                            ("GITHUB_ACTIONS", "false"), ("GITHUB_REPOSITORY", "other/Msk104Master"),
                            ("GITHUB_REF", "refs/heads/feature"), ("GITHUB_EVENT_NAME", "pull_request"),
                            ("GITHUB_EVENT_NAME", "pull_request_target"), ("R2_PUBLISH_ENABLED", "false")):
@@ -87,8 +85,8 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 validate_policy(env)
 
-    # GitLab 原有受保护 main 的上下文不能绕过新的发布入口与显式开关。
-    def test_gitlab_only_and_missing_publish_switch_are_rejected(self):
+    # 缺少工作流上下文或显式发布开关时必须拒绝发布。
+    def test_missing_workflow_context_or_publish_switch_is_rejected(self):
         env = {key: value for key, value in self.env.items() if not key.startswith("GITHUB_")}
         with self.assertRaises(ValueError):
             validate_policy(env)
@@ -114,8 +112,7 @@ class ReleaseTests(unittest.TestCase):
 
     # 固定 GitHub API 地址并使用 Bearer token，精确匹配 main 当前提交。
     def test_current_head_matches_main(self):
-        env = dict(self.env, GH_TOKEN="test-token", GITHUB_API_URL="https://untrusted.invalid",
-                   CI_API_V4_URL="https://gitlab.example/api/v4", CI_JOB_TOKEN="old-token")
+        env = dict(self.env, GH_TOKEN="test-token", GITHUB_API_URL="https://untrusted.invalid")
         response = io.BytesIO(json.dumps({"ref": "refs/heads/main", "object": {
             "type": "commit", "sha": self.env["CI_COMMIT_SHA"]}}).encode())
         with patch("publish_r2.urlopen", return_value=response) as request:
@@ -125,7 +122,6 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(request.call_args.args[0].get_header("Authorization"), "Bearer test-token")
         self.assertEqual(request.call_args.args[0].get_header("Accept"), "application/vnd.github+json")
         self.assertEqual(request.call_args.args[0].get_header("X-github-api-version"), "2022-11-28")
-        self.assertIsNone(request.call_args.args[0].get_header("Job-token"))
 
     # main 已前进、引用不符及非法 JSON 结构均不能覆盖更新清单。
     def test_current_head_rejects_stale_or_missing_main(self):

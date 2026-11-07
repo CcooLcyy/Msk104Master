@@ -91,10 +91,9 @@ function Restore-CargoRecords {
 }
 
 if ($Stage -eq 'cache-finish') {
-    # after_script 使用新 shell；成功作业已经收尾，不得改写成功记录。
-    if ($env:CI_JOB_STATUS -eq 'success') { return }
+    # 失败或取消时在独立步骤重放已落盘的日志，缓存脚本保留已有的成功记录。
     Restore-CargoRecords
-    Invoke-Cache 'finish' 'after-script' @('--status', 'failed')
+    Invoke-Cache 'finish' 'failure-cleanup' @('--status', 'failed')
     return
 }
 
@@ -104,11 +103,8 @@ try {
     Invoke-Checked 'python' @('-B', '-m', 'unittest', 'discover', '-s', 'scripts/ci', '-p', 'test_*.py', '-v')
     Invoke-Cache 'prepare' 'prepare'
     $developerCommand = $env:VSDEVCMD
-    if (-not $developerCommand -and $env:RUNNER_ENV_ROOT) {
-        $developerCommand = Join-Path $env:RUNNER_ENV_ROOT 'tools/vs2022/Common7/Tools/VsDevCmd.bat'
-    }
     if (-not $developerCommand -or -not (Test-Path -LiteralPath $developerCommand -PathType Leaf)) {
-        throw '找不到 MSVC 开发环境脚本，请配置 VSDEVCMD 或 RUNNER_ENV_ROOT'
+        throw '找不到工作流通过 VSDEVCMD 指定的 MSVC 开发环境脚本'
     }
     if ($developerCommand.Contains('"') -or $developerCommand -match '[\r\n]') {
         throw 'MSVC 开发环境脚本路径不合法'
@@ -145,22 +141,10 @@ try {
 
     foreach ($lockfile in @('package-lock.json', 'Cargo.lock')) {
         if (-not (Test-Path -LiteralPath $lockfile -PathType Leaf)) {
-            if ($env:ALLOW_LOCKFILE_BOOTSTRAP -ne '1') {
-                throw "缺少已提交的锁文件：$lockfile"
-            }
-            Write-Host "初始化锁文件：$lockfile；须从本次 CI 产物收回并提交"
-            if ($lockfile -eq 'package-lock.json') {
-                Invoke-Checked 'npm.cmd' @('install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund')
-            } else {
-                Invoke-Checked 'cargo' @('generate-lockfile')
-            }
+            throw "缺少已提交的锁文件：$lockfile"
         }
     }
 
-    if ($env:ALLOW_LOCKFILE_BOOTSTRAP -eq '1') {
-        Write-Host '按显式 CI 引导请求刷新 Cargo.lock，完成后须回收提交'
-        Invoke-Checked 'cargo' @('generate-lockfile')
-    }
     Invoke-Cache 'check' 'before-frontend'
     Invoke-Checked 'npm.cmd' @('ci', '--no-audit', '--no-fund')
     # 先生成内嵌前端资源，再检查包含 Tauri 上下文宏的 Rust 桌面工程。
@@ -168,8 +152,7 @@ try {
     Invoke-Checked 'cargo' @('fmt', '--all', '--', '--check')
     Invoke-CargoStep 'cargo' @('clippy', '--release', '--workspace', '--all-targets', '--features', 'msk104master/custom-protocol', '--target', 'x86_64-pc-windows-msvc', '--locked', '--message-format=json-render-diagnostics', '--', '-D', 'warnings') 'clippy'
     Invoke-CargoStep 'cargo' @('test', '--release', '--workspace', '--features', 'msk104master/custom-protocol', '--target', 'x86_64-pc-windows-msvc', '--locked', '--message-format=json-render-diagnostics') 'test'
-    # 签名发布已迁至 GitHub；GitLab 保留未签名构建，不能继续写入同一更新通道。
-    $signed = $env:GITHUB_ACTIONS -eq 'true' -and $env:GITHUB_REPOSITORY -eq 'CcooLcyy/Msk104Master' -and $env:GITHUB_REF -eq 'refs/heads/main' -and $env:GITHUB_EVENT_NAME -in @('push', 'workflow_dispatch') -and $env:R2_PUBLISH_ENABLED -eq 'true' -and $env:CI_COMMIT_BRANCH -eq 'main' -and $env:CI_COMMIT_REF_PROTECTED -eq 'true' -and $env:CI_PIPELINE_SOURCE -in @('push', 'web')
+    $signed = $env:GITHUB_ACTIONS -eq 'true' -and $env:CI_SIGN_UPDATE -eq 'true'
     if ($signed -and -not $env:TAURI_SIGNING_PRIVATE_KEY) { throw '缺少 Tauri 更新签名私钥，停止发布构建' }
     if ($env:CI_PIPELINE_IID -notmatch '^[1-9][0-9]*$') { throw '流水线版本序号无效' }
     $baseVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
