@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer, type ViteDevServer } from "vite";
+import type { SetpointResult } from "../src/protocol.ts";
 
 let server: ViteDevServer | undefined;
 let html = "";
@@ -146,4 +147,40 @@ test("保留软件更新入口，初始渲染不隐式调用原生命令", () =>
   assert.match(html, /aria-label="软件更新"/);
   buttonNamed(html, "检查更新");
   assert.deepEqual(testGlobals[invocationKey], []);
+});
+
+const setpointRecord: SetpointResult = {
+  operationId: 4, commonAddress: 1, address: 16385, value: 300,
+  status: "terminated", message: "遥调已终止",
+  sentAt: "1760000000100", sentFrameId: 12, sentRaw: "68 12 00 00 00 00 32 01 06 00 01 00 01 40 00 00 00 96 43 00",
+  confirmedAt: "1760000000200", confirmedFrameId: 13, confirmedRaw: "68 12 00 00 02 00 32 01 07 00 01 00 01 40 00 00 00 96 43 00",
+  terminatedAt: "1760000000300", terminatedFrameId: 14, terminatedRaw: "68 12 02 00 02 00 32 01 0A 00 01 00 01 40 00 00 00 96 43 00",
+};
+
+test("遥调结果独立展示三帧证据并保留可读的结果属性", async () => {
+  const { SetpointResultView } = await server!.ssrLoadModule("/src/SetpointResultView.tsx");
+  const columns = ["公共地址", "信息地址", "命令类型", "设定值", "协议确认", "业务反馈", "时间"];
+  const markup = renderToStaticMarkup(createElement(SetpointResultView, { result: setpointRecord, columns }));
+  const row = markup.match(/<tr id="setpoint-result"[^>]*>/)?.[0];
+  assert.ok(row);
+  for (const [field, expected] of [
+    ["state", "terminated"], ["operation-id", 4], ["ioa", 16385], ["common-address", 1], ["value", 300],
+    ["sent-at", setpointRecord.sentAt], ["sent-frame-id", 12], ["sent-raw", setpointRecord.sentRaw],
+    ["confirmed-at", setpointRecord.confirmedAt], ["confirmed-frame-id", 13], ["confirmed-raw", setpointRecord.confirmedRaw],
+    ["terminated-at", setpointRecord.terminatedAt], ["terminated-frame-id", 14], ["terminated-raw", setpointRecord.terminatedRaw],
+  ]) assert.ok(row.includes(`data-${field}="${expected}"`));
+  for (const raw of [setpointRecord.sentRaw, setpointRecord.confirmedRaw, setpointRecord.terminatedRaw]) {
+    assert.ok(text(markup).includes(raw!));
+  }
+});
+
+test("确认后继续锁定发送，终止或拒绝才允许下一笔", async () => {
+  const { isSetpointSendLocked } = await server!.ssrLoadModule("/src/protocol.ts");
+  for (const status of ["queued", "sent", "confirmed", "timeout", "failed"]) {
+    assert.equal(isSetpointSendLocked({ ...setpointRecord, status }), true, status);
+  }
+  for (const status of ["terminated", "rejected"]) {
+    assert.equal(isSetpointSendLocked({ ...setpointRecord, status }), false, status);
+  }
+  assert.equal(isSetpointSendLocked(null), false);
 });

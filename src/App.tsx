@@ -1,7 +1,8 @@
 import UpdatePanel from "./UpdatePanel";
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { directionLabel, displayTime, errorMessage, stateLabels, useProtocol, type PointRow } from "./protocol";
+import { directionLabel, displayTime, errorMessage, isSetpointSendLocked, stateLabels, useProtocol, type PointRow } from "./protocol";
+import { SetpointResultView } from "./SetpointResultView";
 
 interface AppInfo { name: string; version: string; protocol_ready: boolean; test_session: boolean }
 
@@ -70,8 +71,7 @@ export default function App() {
   const state = pending === "connect" && snapshot.state === "disconnected" ? "connecting" : snapshot.state;
   const configLocked = state !== "disconnected";
   const setpoint = snapshot.setpoint;
-  const setpointDisabled = state !== "started" || !!pending
-    || setpoint?.status === "queued" || setpoint?.status === "sent" || setpoint?.status === "timeout";
+  const setpointDisabled = state !== "started" || !!pending || !!readError || isSetpointSendLocked(setpoint);
   const lastFrameId = display.frames.at(-1)?.id;
 
   useEffect(() => {
@@ -293,21 +293,13 @@ export default function App() {
                     <button id="send-setpoint" type="submit" className="button" disabled={setpointDisabled}>发送遥调</button>
                   </div></fieldset>
                   {setpointError && <p className="validation invalid" role="alert">{setpointError}</p>}
+                  {(setpoint?.status === "timeout" || setpoint?.status === "failed")
+                    && <p className="setpoint-note">重新连接后可发送下一笔遥调。</p>}
                 </form>}
                 {point.id === "signals" || point.id === "measurements" || point.id === "events"
                   ? <PointTable rows={pointRows} columns={point.columns} label={point.label} events={point.id === "events"} />
                   : point.id === "setpoints"
-                  ? <div className="table-scroll"><table className="data-table" aria-label="遥调结果">
-                    <thead><tr>{point.columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
-                    <tbody><tr id="setpoint-result" data-state={setpoint?.status || "idle"} data-operation-id={setpoint?.operationId}
-                      data-ioa={setpoint?.address} data-common-address={setpoint?.commonAddress} data-value={setpoint?.value}
-                      data-sent-at={setpoint?.sentAt} data-sent-frame-id={setpoint?.sentFrameId}>
-                      {setpoint ? <><td>{setpoint.commonAddress}</td><td>{setpoint.address}</td><td>C_SE_NC_1</td>
-                        <td>{setpoint.value}</td><td role="status">{setpoint.message}</td><td>由业务侧核验</td>
-                        <td>{setpoint.sentAt ? displayTime(setpoint.sentAt) : "—"}</td></>
-                        : <td colSpan={point.columns.length} className="empty-cell">尚无遥调结果。</td>}
-                    </tr></tbody>
-                  </table></div>
+                  ? <SetpointResultView result={setpoint} columns={point.columns} />
                   : <EmptyTable label={`${point.label}点表`} columns={point.columns} message={`${point.label}尚未实现。`} />}
               </>}
             </div>)}

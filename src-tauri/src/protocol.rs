@@ -4,8 +4,8 @@ use iec104_core::session::{
     ConnectionState, Direction, Event, Session, SessionOptions, TransferState,
 };
 use iec104_core::wire::{
-    parse_asdu, Asdu, Decoder, Frame, InformationObject, PointValue, UFunction,
-    SHORT_FLOAT_SETPOINT_TYPE,
+    parse_asdu, short_float_setpoint, Asdu, Decoder, Frame, InformationObject, PointValue,
+    UFunction, SHORT_FLOAT_SETPOINT_TYPE,
 };
 use iec104_core::ConnectionConfig;
 use serde::Serialize;
@@ -69,6 +69,12 @@ enum SetpointStatus {
     Timeout,
 }
 
+impl SetpointStatus {
+    fn pending(self) -> bool {
+        matches!(self, Self::Queued | Self::Sent | Self::Confirmed)
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetpointResult {
@@ -80,6 +86,13 @@ struct SetpointResult {
     message: String,
     sent_at: Option<String>,
     sent_frame_id: Option<u64>,
+    sent_raw: Option<String>,
+    confirmed_at: Option<String>,
+    confirmed_frame_id: Option<u64>,
+    confirmed_raw: Option<String>,
+    terminated_at: Option<String>,
+    terminated_frame_id: Option<u64>,
+    terminated_raw: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -163,6 +176,16 @@ struct Runtime {
 }
 
 impl Runtime {
+    fn ensure_setpoint_available(&self) -> Result<(), String> {
+        match self.snapshot.setpoint.as_ref().map(|result| result.status) {
+            Some(status) if status.pending() => Err("已有遥调正在等待响应".to_owned()),
+            Some(SetpointStatus::Timeout | SetpointStatus::Failed) => {
+                Err("请重新连接后发送遥调".to_owned())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn queue_setpoint(&mut self, address: u32, value: f32) {
         self.next_setpoint += 1;
         self.snapshot.setpoint = Some(SetpointResult {
@@ -174,6 +197,13 @@ impl Runtime {
             message: "遥调已排队".to_owned(),
             sent_at: None,
             sent_frame_id: None,
+            sent_raw: None,
+            confirmed_at: None,
+            confirmed_frame_id: None,
+            confirmed_raw: None,
+            terminated_at: None,
+            terminated_frame_id: None,
+            terminated_raw: None,
         });
     }
 
@@ -182,7 +212,7 @@ impl Runtime {
             result.status = status;
             result.message = message.to_owned();
         }
-        if status != SetpointStatus::Sent {
+        if !matches!(status, SetpointStatus::Sent | SetpointStatus::Confirmed) {
             self.setpoint_deadline = None;
         }
     }
@@ -192,13 +222,41 @@ impl Runtime {
             .setpoint_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.setpoint_status(SetpointStatus::Timeout, "遥调等待确认超时，请重新连接");
+            let message = if self.snapshot.setpoint.as_ref().is_some_and(|result| {
+                result.status == SetpointStatus::Confirmed
+            }) {
+                "遥调等待终止超时，请重新连接"
+            } else {
+                "遥调等待确认超时，请重新连接"
+            };
+            self.setpoint_status(SetpointStatus::Timeout, message);
         }
+    }
+
+    fn record_setpoint_sent(&mut self, frame: &FrameRow, raw: &[u8], now: Instant) {
+        let Some(result) = self.snapshot.setpoint.as_mut() else {
+            return;
+        };
+        if result.status != SetpointStatus::Queued {
+            return;
+        }
+        let Ok(asdu) = short_float_setpoint(result.common_address, result.address, result.value)
+        else {
+            return;
+        };
+        if raw.get(6..) != Some(asdu.as_slice()) {
+            return;
+        }
+        result.sent_at = Some(frame.time.clone());
+        result.sent_frame_id = Some(frame.id);
+        result.sent_raw = Some(frame.raw.clone());
+        self.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
+        self.setpoint_status(SetpointStatus::Sent, "遥调已发送，等待确认");
     }
 
     fn update_setpoint(&mut self, asdu: &Asdu, now: Instant) {
         self.expire_setpoint(now);
-        let Some(result) = self.snapshot.setpoint.as_ref() else {
+        let Some(result) = self.snapshot.setpoint.as_mut() else {
             return;
         };
         if asdu.type_id != SHORT_FLOAT_SETPOINT_TYPE
@@ -212,20 +270,33 @@ impl Runtime {
         {
             return;
         }
-        match (result.status, asdu.cause, asdu.negative) {
-            (SetpointStatus::Sent, 7, false) => {
-                self.setpoint_status(SetpointStatus::Confirmed, "遥调已确认（COT 7）");
-            }
-            (SetpointStatus::Confirmed, 10, false) => {
-                self.setpoint_status(SetpointStatus::Terminated, "遥调已终止（COT 10）");
-            }
+        let (status, message) = match (result.status, asdu.cause, asdu.negative) {
+            (SetpointStatus::Sent, 7, false) => (SetpointStatus::Confirmed, "遥调已确认（COT 7）"),
+            (SetpointStatus::Confirmed, 10, false) => (SetpointStatus::Terminated, "遥调已终止（COT 10）"),
             (SetpointStatus::Sent, 7, true) | (SetpointStatus::Confirmed, 10, true) => {
-                self.setpoint_status(SetpointStatus::Rejected, "遥调被对端否定");
+                (SetpointStatus::Rejected, "遥调被对端否定")
             }
-            (SetpointStatus::Sent, 44..=47, _) => {
-                self.setpoint_status(SetpointStatus::Rejected, "遥调被对端拒绝");
+            (SetpointStatus::Sent | SetpointStatus::Confirmed, 44..=47, _) => {
+                (SetpointStatus::Rejected, "遥调被对端拒绝")
             }
-            _ => {}
+            _ => return,
+        };
+        // 调用点已核对这是紧邻本次解析事件的接收 I 帧。
+        let Some(frame) = self.snapshot.frames.back() else {
+            return;
+        };
+        if result.status == SetpointStatus::Sent {
+            result.confirmed_at = Some(frame.time.clone());
+            result.confirmed_frame_id = Some(frame.id);
+            result.confirmed_raw = Some(frame.raw.clone());
+        } else {
+            result.terminated_at = Some(frame.time.clone());
+            result.terminated_frame_id = Some(frame.id);
+            result.terminated_raw = Some(frame.raw.clone());
+        }
+        self.setpoint_status(status, message);
+        if status == SetpointStatus::Confirmed {
+            self.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
         }
     }
 
@@ -291,6 +362,9 @@ impl Runtime {
                 Event::Frame { direction, raw } => {
                     let row = self.frame_row(direction, &raw, &time);
                     receiving_i = direction == Direction::Receive && row.kind == "I";
+                    if direction == Direction::Send && row.kind == "I" {
+                        self.record_setpoint_sent(&row, &raw, now);
+                    }
                     push_bounded(&mut self.snapshot.frames, row, FRAME_LIMIT);
                 }
                 Event::SendFailure { raw, error } => {
@@ -549,6 +623,7 @@ pub(crate) fn protocol_connect(
         ..Default::default()
     };
     runtime.common_address = common_address;
+    runtime.setpoint_deadline = None;
     runtime.worker = Some(sender);
     Ok(())
 }
@@ -601,15 +676,7 @@ pub(crate) fn protocol_setpoint(
     if runtime.snapshot.state != LinkState::Started {
         return Err("数据传输启动后才可发送遥调".to_owned());
     }
-    if let Some(result) = &runtime.snapshot.setpoint {
-        match result.status {
-            SetpointStatus::Queued | SetpointStatus::Sent => {
-                return Err("已有遥调正在等待响应".to_owned());
-            }
-            SetpointStatus::Timeout => return Err("请重新连接后发送遥调".to_owned()),
-            _ => {}
-        }
-    }
+    runtime.ensure_setpoint_available()?;
     runtime
         .worker
         .as_ref()
@@ -663,9 +730,12 @@ fn run_worker(
         if runtime.snapshot.interrogation_pending {
             runtime.end_interrogation("会话已断开，总召结束");
         }
-        if runtime.snapshot.setpoint.as_ref().is_some_and(|result| {
-            matches!(result.status, SetpointStatus::Queued | SetpointStatus::Sent)
-        }) {
+        if runtime
+            .snapshot
+            .setpoint
+            .as_ref()
+            .is_some_and(|result| result.status.pending())
+        {
             runtime.setpoint_status(SetpointStatus::Failed, "会话已断开，遥调结果未确认");
         }
         runtime.snapshot.state = LinkState::Disconnected;
@@ -716,13 +786,13 @@ fn drive_session(
                 runtime.ingest(session.drain_events(), now);
                 match result {
                     Ok(()) => {
-                        let frame_id = runtime.next_frame;
-                        if let Some(result) = runtime.snapshot.setpoint.as_mut() {
-                            result.sent_at = Some(timestamp());
-                            result.sent_frame_id = Some(frame_id);
+                        if !runtime.snapshot.setpoint.as_ref().is_some_and(|result| {
+                            result.status == SetpointStatus::Sent
+                        }) {
+                            let error = "未找到本次遥调发送帧，请重新连接";
+                            runtime.setpoint_status(SetpointStatus::Failed, error);
+                            return Err(error.to_owned());
                         }
-                        runtime.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
-                        runtime.setpoint_status(SetpointStatus::Sent, "遥调已发送，等待确认");
                         log::info!("已发送 IEC104 短浮点遥调：CA={common_address} IOA={address} 值={value}");
                     }
                     Err(error) => {
@@ -756,7 +826,115 @@ fn drive_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iec104_core::wire::short_float_setpoint;
+
+    fn setpoint_frame(direction: Direction, asdu: Vec<u8>) -> Event {
+        Event::Frame {
+            direction,
+            raw: Frame::I {
+                send: 0,
+                recv: 0,
+                asdu,
+            }
+            .encode()
+            .unwrap(),
+        }
+    }
+
+    fn setpoint_reply(mut asdu: Vec<u8>, cause: u8) -> Vec<Event> {
+        asdu[2] = cause;
+        vec![
+            setpoint_frame(Direction::Receive, asdu.clone()),
+            Event::Asdu(parse_asdu(&asdu).unwrap()),
+        ]
+    }
+
+    // 验证三帧证据绑定到实际报文，并在清空历史后保留。
+    #[test]
+    fn setpoint_keeps_independent_frame_evidence() {
+        let now = Instant::now();
+        let mut runtime = Runtime {
+            common_address: 1,
+            ..Runtime::default()
+        };
+        let command = short_float_setpoint(1, 7, 300.0).unwrap();
+        runtime.queue_setpoint(7, 300.0);
+        runtime.ingest(vec![setpoint_frame(Direction::Send, command.clone())], now);
+        runtime.ingest(setpoint_reply(command.clone(), 10), now);
+        runtime.ingest(setpoint_reply(command.clone(), 0x87), now);
+        runtime.ingest(
+            setpoint_reply(short_float_setpoint(1, 8, 300.0).unwrap(), 7),
+            now,
+        );
+        let result = runtime.snapshot.setpoint.as_ref().unwrap();
+        assert_eq!(result.status, SetpointStatus::Sent);
+        assert!(result.confirmed_frame_id.is_none() && result.terminated_frame_id.is_none());
+
+        runtime.ingest(setpoint_reply(command.clone(), 7), now);
+        let result = runtime.snapshot.setpoint.as_ref().unwrap();
+        assert_eq!(result.status, SetpointStatus::Confirmed);
+        assert!(runtime.ensure_setpoint_available().is_err());
+        runtime.ingest(setpoint_reply(command, 10), now);
+        let frames = runtime.snapshot.frames.clone();
+        runtime.snapshot.clear();
+        assert!(runtime.snapshot.frames.is_empty());
+        let result = runtime.snapshot.setpoint.as_ref().unwrap();
+        assert_eq!(result.status, SetpointStatus::Terminated);
+        for (id, time, raw, frame) in [
+            (result.sent_frame_id, &result.sent_at, &result.sent_raw, &frames[0]),
+            (result.confirmed_frame_id, &result.confirmed_at, &result.confirmed_raw, &frames[4]),
+            (result.terminated_frame_id, &result.terminated_at, &result.terminated_raw, &frames[5]),
+        ] {
+            assert_eq!(id, Some(frame.id));
+            assert_eq!(time.as_deref(), Some(frame.time.as_str()));
+            assert_eq!(raw.as_deref(), Some(frame.raw.as_str()));
+        }
+    }
+
+    // 验证肯定确认开启独立终止计时，迟到终止不改变超时结果。
+    #[test]
+    fn setpoint_termination_timeout_requires_reconnect() {
+        let now = Instant::now();
+        let mut runtime = Runtime {
+            common_address: 1,
+            ..Runtime::default()
+        };
+        let command = short_float_setpoint(1, 7, 300.0).unwrap();
+        runtime.queue_setpoint(7, 300.0);
+        runtime.ingest(vec![setpoint_frame(Direction::Send, command.clone())], now);
+        let confirmed_at = now + SETPOINT_TIMEOUT - Duration::from_secs(1);
+        runtime.ingest(setpoint_reply(command.clone(), 7), confirmed_at);
+        runtime.expire_setpoint(now + SETPOINT_TIMEOUT);
+        assert_eq!(
+            runtime.snapshot.setpoint.as_ref().unwrap().status,
+            SetpointStatus::Confirmed
+        );
+
+        runtime.ingest(setpoint_reply(command, 10), confirmed_at + SETPOINT_TIMEOUT);
+        let result = runtime.snapshot.setpoint.as_ref().unwrap();
+        assert_eq!(result.status, SetpointStatus::Timeout);
+        assert!(result.message.contains("终止"));
+        assert!(result.sent_raw.is_some() && result.confirmed_raw.is_some());
+        assert!(result.terminated_raw.is_none());
+        assert!(runtime.ensure_setpoint_available().is_err());
+    }
+
+    // 验证发送结果未知时保留已有证据，并禁止在原连接再次发送。
+    #[test]
+    fn failed_setpoint_requires_reconnect() {
+        let mut runtime = Runtime {
+            common_address: 1,
+            ..Runtime::default()
+        };
+        let command = short_float_setpoint(1, 7, 300.0).unwrap();
+        runtime.queue_setpoint(7, 300.0);
+        runtime.ingest(
+            vec![setpoint_frame(Direction::Send, command)],
+            Instant::now(),
+        );
+        runtime.setpoint_status(SetpointStatus::Failed, "会话已断开，遥调结果未确认");
+        assert!(runtime.ensure_setpoint_available().is_err());
+        assert!(runtime.snapshot.setpoint.unwrap().sent_raw.is_some());
+    }
 
     #[test]
     fn short_float_setpoint_matches_only_the_active_command() {
@@ -778,24 +956,21 @@ mod tests {
             (1, 7, -12.5, 10, 0, 0),
         ] {
             let mut bytes = short_float_setpoint(ca, ioa, value).unwrap();
-            bytes[2] = cause;
             bytes[3] = oa;
             bytes[13] = qos;
-            runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now);
+            runtime.ingest(setpoint_reply(bytes, cause), now);
             assert_eq!(
                 runtime.snapshot.setpoint.as_ref().unwrap().status,
                 SetpointStatus::Sent
             );
         }
-        let mut bytes = short_float_setpoint(1, 7, -12.5).unwrap();
-        bytes[2] = 7;
-        runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now);
+        let bytes = short_float_setpoint(1, 7, -12.5).unwrap();
+        runtime.ingest(setpoint_reply(bytes.clone(), 7), now);
         assert_eq!(
             runtime.snapshot.setpoint.as_ref().unwrap().status,
             SetpointStatus::Confirmed
         );
-        bytes[2] = 10;
-        runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now);
+        runtime.ingest(setpoint_reply(bytes, 10), now);
         assert_eq!(
             runtime.snapshot.setpoint.as_ref().unwrap().status,
             SetpointStatus::Terminated
@@ -809,12 +984,11 @@ mod tests {
             common_address: 1,
             ..Runtime::default()
         };
-        let mut bytes = short_float_setpoint(1, 7, 8.0).unwrap();
+        let bytes = short_float_setpoint(1, 7, 8.0).unwrap();
         runtime.queue_setpoint(7, 8.0);
         runtime.setpoint_status(SetpointStatus::Sent, "遥调已发送");
         runtime.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
-        bytes[2] = 0x47;
-        runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now);
+        runtime.ingest(setpoint_reply(bytes.clone(), 0x47), now);
         assert_eq!(
             runtime.snapshot.setpoint.as_ref().unwrap().status,
             SetpointStatus::Rejected
@@ -822,8 +996,7 @@ mod tests {
         runtime.queue_setpoint(7, 8.0);
         runtime.setpoint_status(SetpointStatus::Sent, "遥调已发送");
         runtime.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
-        bytes[2] = 7;
-        runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now + SETPOINT_TIMEOUT);
+        runtime.ingest(setpoint_reply(bytes, 7), now + SETPOINT_TIMEOUT);
         let result = runtime.snapshot.setpoint.unwrap();
         assert_eq!(result.operation_id, 2);
         assert_eq!(result.status, SetpointStatus::Timeout);

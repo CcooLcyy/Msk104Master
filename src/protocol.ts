@@ -32,7 +32,7 @@ export interface PointRow {
 
 type SessionState = "disconnected" | "connecting" | "starting" | "started" | "disconnecting";
 type DisplayData = { frames: FrameRow[]; points: PointRow[]; events: PointRow[] };
-interface SetpointResult {
+export interface SetpointResult {
   operationId: number;
   commonAddress: number;
   address: number;
@@ -41,6 +41,19 @@ interface SetpointResult {
   message: string;
   sentAt: string | null;
   sentFrameId: number | null;
+  sentRaw: string | null;
+  confirmedAt: string | null;
+  confirmedFrameId: number | null;
+  confirmedRaw: string | null;
+  terminatedAt: string | null;
+  terminatedFrameId: number | null;
+  terminatedRaw: string | null;
+}
+
+export function isSetpointSendLocked(result: SetpointResult | null): boolean {
+  const status = result?.status;
+  return status === "queued" || status === "sent" || status === "confirmed"
+    || status === "timeout" || status === "failed";
 }
 interface ProtocolSnapshot extends DisplayData {
   state: SessionState;
