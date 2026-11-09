@@ -62,14 +62,16 @@ function buttonNamed(markup: string, name: string): string {
   return matches[0];
 }
 
-test("顶部协议操作保持禁用，并解释尚未实现", () => {
+test("初始状态可主动连接，断开和总召须等待会话，对时仍禁用", () => {
   const header = elements(html, "header")[0];
   assert.ok(header, "工作台应有顶部操作栏");
-  for (const name of ["连接", "断开", "总召", "对时"]) {
+  const disabled = /\sdisabled(?:=""|\s|>)/;
+  assert.doesNotMatch(openingTag(buttonNamed(header, "连接")), disabled);
+  for (const name of ["断开", "总召", "对时"]) {
     const attributes = openingTag(buttonNamed(header, name));
-    assert.match(attributes, /\sdisabled(?:=""|\s|>)/, `${name}不得发送协议命令`);
-    assert.match(attributes, /\stitle="[^"]*(?:未实现|待实现)[^"]*"/);
+    assert.match(attributes, disabled, `初始状态须禁用${name}`);
   }
+  assert.match(openingTag(buttonNamed(header, "对时")), /\stitle="[^"]*(?:未实现|待实现)[^"]*"/);
 });
 
 test("状态、通信设置、报文列表与详情在同一工作台同时存在", () => {
@@ -78,7 +80,6 @@ test("状态、通信设置、报文列表与详情在同一工作台同时存�
     assert.ok(headings.includes(title), `初始工作台缺少${title}`);
   }
   assert.match(text(html), /未连接/);
-  assert.match(text(html), /协议.*(?:未实现|待实现)|(?:未实现|待实现).*协议/);
 });
 
 test("六类点表页签可识别，初始选择遥信", () => {

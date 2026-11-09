@@ -1,6 +1,7 @@
 use iec104_core::ConnectionConfig;
 use serde::Serialize;
 
+mod protocol;
 mod updater;
 
 #[derive(Serialize)]
@@ -15,7 +16,7 @@ fn get_app_info(app: tauri::AppHandle) -> AppInfo {
     AppInfo {
         name: "Msk104Master",
         version: app.package_info().version.to_string(),
-        protocol_ready: false,
+        protocol_ready: true,
     }
 }
 
@@ -33,14 +34,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(protocol::ProtocolState::default())
         .manage(updater::UpdateState::default())
         .setup(|_| {
-            log::info!("主站桌面应用已运行，当前为工程骨架，协议连接功能尚未实现");
+            log::info!("主站桌面应用已运行，等待用户连接");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             validate_connection,
+            protocol::protocol_connect,
+            protocol::protocol_disconnect,
+            protocol::protocol_interrogate,
+            protocol::protocol_clear,
+            protocol::protocol_snapshot,
             updater::check_update,
             updater::install_update
         ])

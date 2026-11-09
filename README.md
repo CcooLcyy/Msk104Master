@@ -2,7 +2,7 @@
 
 基于 **Tauri 2 + Rust + React/TypeScript** 的独立 IEC104 模拟主站。
 
-当前版本 `0.1.0` 包含中文工作台、连接参数校验与首版独立 IEC104 协议内核。内核提供 TCP 会话、链路管理、总召及常用遥信/遥测解析；**桌面界面尚未接入内核，安装版仍不能建立 104 连接**。遥控、遥调尚未实现；界面不产生模拟接收数据，也不会自动连接设备。
+工作台提供 IEC104 手动连接、断开、总召、遥信和遥测显示及收发报文详情。填写目标主机、端口和公共地址后点击「连接」，待数据传输已启动后可点击「总召」。遥控、遥调和对时待实现。
 
 ## 工程结构
 
@@ -31,7 +31,7 @@ Windows 检查、测试和打包统一使用 x64 Release；GitHub 使用独立�
 
 在开发环境获得授权并具备 Node.js、Rust、Windows C++ Build Tools 与 WebView2 后，Tauri 开发入口为 `npm run tauri -- dev`。工程常用脚本是 `npm run build` 和 `npm run tauri -- build --no-bundle`；默认由 CI 调用。
 
-首版内核的范围、接口及验证边界见 [协议内核首版](docs/协议内核首版.md)。后续将桌面与自动化接口接入同一会话，再独立实现控制命令。初始骨架验收标准见 [工程设计](docs/工程设计.md)。
+桌面会话和显示行为见 [工作台协议接入](docs/工作台协议接入.md)。内核范围和接口见 [协议内核首版](docs/协议内核首版.md)。初始骨架验收标准见 [工程设计](docs/工程设计.md)。
 
 Tauri 配置与平台依赖参考官方 [配置说明](https://v2.tauri.app/reference/config/) 和 [前置条件](https://v2.tauri.app/start/prerequisites/)。
 
