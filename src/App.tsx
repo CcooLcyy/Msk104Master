@@ -155,8 +155,8 @@ export default function App() {
       <aside className={`side-panel status-panel ${statusOpen ? "" : "collapsed"}`} aria-label="运行状态侧栏">
         <div className="panel-heading"><h2 id="status-heading">运行状态</h2><button className="collapse-button" aria-label={statusOpen ? "折叠运行状态" : "展开运行状态"} aria-expanded={statusOpen} aria-controls="status-content" onClick={() => {
           setStatusOpen(!statusOpen); console.info(statusOpen ? "已折叠运行状态" : "已展开运行状态");
-        }}>{statusOpen ? "‹" : "›"}</button></div>
-        <div id="status-content" hidden={!statusOpen}>
+        }}><span aria-hidden="true">‹</span></button></div>
+        <div className="side-content" id="status-content" inert={!statusOpen}>
           <div className="session-state"><i aria-hidden="true" />未连接</div>
           <dl className="session-details">
             {[["TCP 连接", "未建立"], ["数据传输", "未启动"], ["总召状态", "未执行"], ["最近接收", "无数据"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
@@ -212,8 +212,8 @@ export default function App() {
       <aside className={`side-panel settings-panel ${settingsOpen ? "" : "collapsed"}`} aria-label="通信设置侧栏">
         <div className="panel-heading"><h2>通信设置</h2><button className="collapse-button" aria-label={settingsOpen ? "折叠通信设置" : "展开通信设置"} aria-expanded={settingsOpen} aria-controls="settings-content" onClick={() => {
           setSettingsOpen(!settingsOpen); console.info(settingsOpen ? "已折叠通信设置" : "已展开通信设置");
-        }}>{settingsOpen ? "›" : "‹"}</button></div>
-        <div id="settings-content" hidden={!settingsOpen}>
+        }}><span aria-hidden="true">›</span></button></div>
+        <div className="side-content" id="settings-content" inert={!settingsOpen}>
           <form onSubmit={validate} aria-busy={validating}>
             <fieldset disabled={validating}>
               <label>目标主机<input value={config.host} onChange={(event) => updateConfig("host", event.target.value)} required autoComplete="off" spellCheck={false} /></label>

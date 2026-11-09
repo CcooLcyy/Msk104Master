@@ -91,6 +91,19 @@ test("六类点表页签可识别，初始选择遥信", () => {
   assert.match(html, /role="tabpanel"/);
 });
 
+test("侧栏初始展开，折叠按钮关联可交互的内容区域", () => {
+  const buttons = elements(html, "button").map(openingTag);
+  for (const [id, label] of [["status-content", "运行状态"], ["settings-content", "通信设置"]]) {
+    const button = buttons.find((tag) => tag.includes(`aria-controls="${id}"`));
+    assert.ok(button, `缺少${label}折叠按钮`);
+    assert.match(button, /\saria-expanded="true"/);
+    assert.ok(button.includes(`aria-label="折叠${label}"`));
+    const content = html.match(new RegExp(`<div\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
+    assert.ok(content, `缺少${label}内容区域`);
+    assert.doesNotMatch(content, /\s(?:hidden|inert)(?:=|\s|>)/);
+  }
+});
+
 test("报文及点表保持诚实空状态，不预填实际数据", () => {
   const tables = elements(html, "table");
   assert.ok(tables.length >= 2, "应同时展示报文表格与分类点表");
