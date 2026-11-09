@@ -1,7 +1,11 @@
 //! 桌面工作台与协议会话之间的命令和快照。
 
-use iec104_core::session::{ConnectionState, Direction, Event, Session, SessionOptions, TransferState};
-use iec104_core::wire::{parse_asdu, Asdu, Decoder, Frame, InformationObject, PointValue, UFunction};
+use iec104_core::session::{
+    ConnectionState, Direction, Event, Session, SessionOptions, TransferState,
+};
+use iec104_core::wire::{
+    parse_asdu, Asdu, Decoder, Frame, InformationObject, PointValue, UFunction,
+};
 use iec104_core::ConnectionConfig;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -401,7 +405,10 @@ fn add_asdu_details(row: &mut FrameRow, asdu: &Asdu) {
     } in &asdu.objects
     {
         let (_, display) = point_value(value);
-        let _ = write!(row.parsed, "\nIOA={address} 值={display} 品质=0x{quality:02X}");
+        let _ = write!(
+            row.parsed,
+            "\nIOA={address} 值={display} 品质=0x{quality:02X}"
+        );
         if let Some(raw) = timestamp {
             let _ = write!(row.parsed, " 时标={}", hex(raw));
         }
@@ -484,7 +491,11 @@ pub(crate) fn protocol_snapshot(
     Ok(lock(&state.runtime)?.snapshot.clone())
 }
 
-fn run_worker(shared: &Mutex<Runtime>, receiver: &mpsc::Receiver<Action>, config: ConnectionConfig) {
+fn run_worker(
+    shared: &Mutex<Runtime>,
+    receiver: &mpsc::Receiver<Action>,
+    config: ConnectionConfig,
+) {
     let common_address = config.common_address;
     let mut trailing_events = Vec::new();
     let result = (|| {
@@ -582,7 +593,11 @@ mod tests {
         runtime.update_interrogation(&response(10, 1, 20), now);
         assert_eq!(runtime.snapshot.interrogation, "总召已发送");
         assert!(runtime.snapshot.interrogation_pending);
-        for asdu in [response(7, 2, 20), response(7, 1, 21), response(0x87, 1, 20)] {
+        for asdu in [
+            response(7, 2, 20),
+            response(7, 1, 21),
+            response(0x87, 1, 20),
+        ] {
             runtime.update_interrogation(&asdu, now);
             assert_eq!(runtime.snapshot.interrogation, "总召已发送");
         }
