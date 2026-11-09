@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type K
 import { invoke } from "@tauri-apps/api/core";
 import { directionLabel, displayTime, errorMessage, stateLabels, useProtocol, type PointRow } from "./protocol";
 
-interface AppInfo { name: string; version: string; protocol_ready: boolean }
+interface AppInfo { name: string; version: string; protocol_ready: boolean; test_session: boolean }
 
 const pointTypes = [
   { id: "signals", label: "遥信", columns: ["公共地址", "信息地址", "类型", "状态", "品质", "协议时标", "接收时间"] },
@@ -29,7 +29,8 @@ function PointTable({ rows, columns, label, events }: { rows: PointRow[]; column
   if (!rows.length) return <EmptyTable label={`${label}点表`} columns={columns} message={`尚无${label}数据，等待设备实际上送。`} />;
   return <div className="table-scroll"><table className="data-table" aria-label={`${label}点表`}>
     <thead><tr>{columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.id}>
+    <tbody>{rows.map((row) => <tr key={row.id} data-received-at={row.time}
+      data-point-type={row.typeId} data-received-frame-id={row.receivedFrameId}>
       <td>{row.commonAddress}</td><td>{row.address}</td>{!events && <td>{row.typeId}</td>}
       <td>{row.value}</td><td>{row.quality}</td><td>{row.timestamp || "—"}</td><td>{displayTime(row.time)}</td>
     </tr>)}</tbody>
@@ -46,6 +47,9 @@ export default function App() {
   const [statusOpen, setStatusOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const { snapshot, display, paused, togglePause, pending, actionBusy, actionError, readError, displayRevision, run } = useProtocol();
+  const [setpointAddress, setSetpointAddress] = useState("");
+  const [setpointValue, setSetpointValue] = useState("");
+  const [setpointError, setSetpointError] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
   const [activePoint, setActivePoint] = useState<PointType>("signals");
   const [detailMode, setDetailMode] = useState<"raw" | "parsed">("raw");
@@ -65,6 +69,9 @@ export default function App() {
   );
   const state = pending === "connect" && snapshot.state === "disconnected" ? "connecting" : snapshot.state;
   const configLocked = state !== "disconnected";
+  const setpoint = snapshot.setpoint;
+  const setpointDisabled = state !== "started" || !!pending
+    || setpoint?.status === "queued" || setpoint?.status === "sent" || setpoint?.status === "timeout";
   const lastFrameId = display.frames.at(-1)?.id;
 
   useEffect(() => {
@@ -129,6 +136,21 @@ export default function App() {
     void run({ kind: "connect", config: connectionConfig() });
   }
 
+  function sendSetpoint(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (setpointDisabled || actionBusy.current) return;
+    const address = Number(setpointAddress);
+    const number = Number(setpointValue);
+    const value = Math.fround(number);
+    if (!setpointAddress.trim() || !Number.isInteger(address) || address < 0 || address > 0xff_ffff
+      || !setpointValue.trim() || !Number.isFinite(value) || (number !== 0 && value === 0)) {
+      setSetpointError("请填写有效的三字节信息地址和可表示的短浮点值。");
+      return;
+    }
+    setSetpointError("");
+    void run({ kind: "setpoint", address, value });
+  }
+
   function changeSplit(value: number) {
     setSplit(Math.max(25, Math.min(65, Math.round(value))));
   }
@@ -164,7 +186,7 @@ export default function App() {
     document.getElementById(`tab-${pointTypes[next].id}`)?.focus();
   }
 
-  return <div className="workspace">
+  return <div className="workspace" data-test-session={info?.test_session === true ? "true" : undefined}>
     <header className="topbar">
       <div className="brand"><span className="brand-mark" aria-hidden="true">104</span>
         <div><h1>Msk104Master</h1><span>IEC104 模拟主站 · 调试工作台</span></div>
@@ -183,10 +205,12 @@ export default function App() {
         }} />自动滚动</label>
         <button className="button" disabled title="报文导出尚未实现">导出报文</button>
       </div>
-      <details className="update-menu"><summary>软件更新 <span className="version">{info ? `v${info.version}` : "版本待读取"}</span></summary><UpdatePanel /></details>
+      <details className="update-menu"><summary>软件更新 <span className="version">{info ? `v${info.version}` : "版本待读取"}</span></summary>
+        {info?.test_session ? <p className="update-panel">测试会话已禁用更新。</p> : <UpdatePanel enabled={info?.test_session === false} />}
+      </details>
     </header>
 
-    <div className="capability-note">连接后自动启动数据传输，收到 STARTDT 确认后可总召。对时、遥控、遥调、电量和报文导出尚未实现。</div>
+    <div className="capability-note">连接后自动启动数据传输，收到 STARTDT 确认后可总召及短浮点遥调。对时、遥控、电量和报文导出尚未实现。</div>
     {appError && <div className="notice error" role="alert">应用信息读取失败：{appError}</div>}
     {actionError && <div className="notice error" role="alert">{actionError}</div>}
     {readError && <div className="notice error" role="alert">{readError}</div>}
@@ -253,15 +277,37 @@ export default function App() {
             </div>
             {pointTypes.map((point) => <div key={point.id} id={`points-${point.id}`} role="tabpanel" aria-labelledby={`tab-${point.id}`} hidden={activePoint !== point.id} tabIndex={0} className="point-tabpanel">
               {activePoint === point.id && <>
-                {(point.id === "controls" || point.id === "setpoints") && <div className="command-area">
-                  <fieldset disabled title={`${point.label}尚未实现`}><legend>{point.label}操作 · 协议能力待实现</legend><div className="command-fields">
+                {point.id === "controls" && <div className="command-area">
+                  <fieldset disabled title="遥控尚未实现"><legend>遥控操作 · 协议能力待实现</legend><div className="command-fields">
                     <label>信息地址<input type="number" placeholder="IOA" /></label>
-                    <label>命令值<input placeholder={point.id === "controls" ? "开 / 合" : "设定值"} /></label>
-                    <button className="button" disabled title={`${point.label}尚未实现`}>发送{point.label}</button>
+                    <label>命令值<input placeholder="开 / 合" /></label>
+                    <button className="button" disabled title="遥控尚未实现">发送遥控</button>
                   </div></fieldset>
                 </div>}
+                {point.id === "setpoints" && <form className="command-area" onSubmit={sendSetpoint}>
+                  <fieldset disabled={setpointDisabled}><legend>短浮点遥调 · 直接执行</legend><div className="command-fields">
+                    <label>信息地址<input id="setpoint-ioa" type="number" min="0" max="16777215" step="1" value={setpointAddress}
+                      onChange={(event) => setSetpointAddress(event.target.value)} required /></label>
+                    <label>设定值<input id="setpoint-value" type="number" step="any" value={setpointValue}
+                      onChange={(event) => setSetpointValue(event.target.value)} required /></label>
+                    <button id="send-setpoint" type="submit" className="button" disabled={setpointDisabled}>发送遥调</button>
+                  </div></fieldset>
+                  {setpointError && <p className="validation invalid" role="alert">{setpointError}</p>}
+                </form>}
                 {point.id === "signals" || point.id === "measurements" || point.id === "events"
                   ? <PointTable rows={pointRows} columns={point.columns} label={point.label} events={point.id === "events"} />
+                  : point.id === "setpoints"
+                  ? <div className="table-scroll"><table className="data-table" aria-label="遥调结果">
+                    <thead><tr>{point.columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
+                    <tbody><tr id="setpoint-result" data-state={setpoint?.status || "idle"} data-operation-id={setpoint?.operationId}
+                      data-ioa={setpoint?.address} data-common-address={setpoint?.commonAddress} data-value={setpoint?.value}
+                      data-sent-at={setpoint?.sentAt} data-sent-frame-id={setpoint?.sentFrameId}>
+                      {setpoint ? <><td>{setpoint.commonAddress}</td><td>{setpoint.address}</td><td>C_SE_NC_1</td>
+                        <td>{setpoint.value}</td><td role="status">{setpoint.message}</td><td>由业务侧核验</td>
+                        <td>{setpoint.sentAt ? displayTime(setpoint.sentAt) : "—"}</td></>
+                        : <td colSpan={point.columns.length} className="empty-cell">尚无遥调结果。</td>}
+                    </tr></tbody>
+                  </table></div>
                   : <EmptyTable label={`${point.label}点表`} columns={point.columns} message={`${point.label}尚未实现。`} />}
               </>}
             </div>)}
@@ -284,7 +330,7 @@ export default function App() {
             {validation && <p className={`validation ${validation.ok ? "valid" : "invalid"}`} role="status">{validation.message}</p>}
           </form>
           <p className="panel-note">TCP 客户端 · 主站<br />参数仅保留在本次窗口，不自动建立连接。</p>
-          <div className="protocol-settings"><h3 className="minor-heading">协议参数</h3><dl className="session-details"><div><dt>协议</dt><dd>IEC 60870-5-104</dd></div><div><dt>命令发送</dt><dd>尚未实现</dd></div></dl></div>
+          <div className="protocol-settings"><h3 className="minor-heading">协议参数</h3><dl className="session-details"><div><dt>协议</dt><dd>IEC 60870-5-104</dd></div><div><dt>命令发送</dt><dd>短浮点直接执行</dd></div></dl></div>
         </div>
       </aside>
     </main>

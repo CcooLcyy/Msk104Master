@@ -2,6 +2,7 @@
 
 const MAX_SEQUENCE: u16 = 0x7fff;
 const MAX_ASDU_LENGTH: usize = 249;
+pub const SHORT_FLOAT_SETPOINT_TYPE: u8 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UFunction {
@@ -166,6 +167,33 @@ pub fn general_interrogation(common_address: u16) -> Vec<u8> {
     vec![100, 1, 6, 0, low, high, 0, 0, 0, 20]
 }
 
+/// 单个 C_SE_NC_1 短浮点直接执行对象，QOS 取零。
+pub fn short_float_setpoint(
+    common_address: u16,
+    address: u32,
+    value: f32,
+) -> Result<Vec<u8>, String> {
+    if address > 0xff_ffff || !value.is_finite() {
+        return Err("遥调须使用三字节信息地址及有限的短浮点值".to_owned());
+    }
+    let [ca_low, ca_high] = common_address.to_le_bytes();
+    let [ioa_low, ioa_middle, ioa_high, _] = address.to_le_bytes();
+    let mut asdu = vec![
+        SHORT_FLOAT_SETPOINT_TYPE,
+        1,
+        6,
+        0,
+        ca_low,
+        ca_high,
+        ioa_low,
+        ioa_middle,
+        ioa_high,
+    ];
+    asdu.extend_from_slice(&value.to_le_bytes());
+    asdu.push(0);
+    Ok(asdu)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Asdu {
     pub type_id: u8,
@@ -182,7 +210,7 @@ pub struct Asdu {
 pub struct InformationObject {
     pub address: u32,
     pub value: PointValue,
-    /// 原始 SIQ/DIQ（含状态位）或 QDS；总召无品质字段时为零。
+    /// 原始 SIQ/DIQ（含状态位）、QDS 或遥调 QOS；总召为零。
     pub quality: u8,
     /// 原始 CP56Time2a；此层不校验日历或解释时区。
     pub timestamp: Option<[u8; 7]>,
@@ -205,6 +233,10 @@ pub fn parse_asdu(bytes: &[u8]) -> Result<Asdu, String> {
     let type_id = bytes[0];
     let (base_type, timed) = match type_id {
         1 | 3 | 9 | 11 | 13 | 100 => (type_id, false),
+        SHORT_FLOAT_SETPOINT_TYPE if bytes[1] == 1 => (13, false),
+        SHORT_FLOAT_SETPOINT_TYPE => {
+            return Err("短浮点遥调 ASDU 必须为 SQ=0 且只有一个对象".to_owned())
+        }
         30 => (1, true),
         31 => (3, true),
         34 => (9, true),

@@ -1,4 +1,27 @@
-use iec104_core::wire::{general_interrogation, parse_asdu, Decoder, Frame, PointValue, UFunction};
+use iec104_core::wire::{
+    general_interrogation, parse_asdu, short_float_setpoint, Decoder, Frame, PointValue, UFunction,
+};
+
+#[test]
+fn short_float_setpoint_has_fixed_execute_bytes_and_decodes_confirmation() {
+    let mut bytes = short_float_setpoint(0x1234, 0x01_2345, -12.5).unwrap();
+    assert_eq!(
+        bytes,
+        [50, 1, 6, 0, 0x34, 0x12, 0x45, 0x23, 0x01, 0, 0, 0x48, 0xc1, 0]
+    );
+    bytes[2] = 0x47;
+    let asdu = parse_asdu(&bytes).unwrap();
+    assert_eq!(asdu.type_id, 50);
+    assert_eq!(asdu.cause, 7);
+    assert!(asdu.negative);
+    assert_eq!(asdu.objects[0].address, 0x01_2345);
+    assert_eq!(asdu.objects[0].value, PointValue::Float(-12.5));
+    assert_eq!(asdu.objects[0].quality, 0);
+    bytes[1] = 0x81;
+    assert!(parse_asdu(&bytes).is_err());
+    assert!(short_float_setpoint(1, 0x100_0000, 1.0).is_err());
+    assert!(short_float_setpoint(1, 1, f32::INFINITY).is_err());
+}
 
 #[test]
 fn fixed_control_frames_and_sequence_boundaries() {

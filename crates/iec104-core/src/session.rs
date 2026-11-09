@@ -1,5 +1,7 @@
 //! 显式驱动的同步 TCP 会话。调用者须持续调用 `poll` 才会推进定时器。
-use crate::wire::{general_interrogation, parse_asdu, Asdu, Decoder, Frame, UFunction};
+use crate::wire::{
+    general_interrogation, parse_asdu, short_float_setpoint, Asdu, Decoder, Frame, UFunction,
+};
 use crate::ConnectionConfig;
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
@@ -236,9 +238,21 @@ impl Session {
 
     /// 发送 C_IC_NA_1 总召激活；发送成功不等于收到总召确认或终止。
     pub fn interrogate(&mut self) -> Result<(), String> {
+        self.send_asdu(general_interrogation(self.config.common_address), "总召")
+    }
+
+    /// 发送 C_SE_NC_1 直接执行；确认与终止由调用者根据接收事件关联。
+    pub fn setpoint(&mut self, address: u32, value: f32) -> Result<(), String> {
+        self.send_asdu(
+            short_float_setpoint(self.config.common_address, address, value)?,
+            "遥调",
+        )
+    }
+
+    fn send_asdu(&mut self, asdu: Vec<u8>, action: &str) -> Result<(), String> {
         self.tick(Instant::now())?;
         if self.transfer != TransferState::Started {
-            return Err("只有 STARTDT 确认后才能发送总召".to_owned());
+            return Err(format!("只有 STARTDT 确认后才能发送{action}"));
         }
         if self.sequence.pending.len() >= usize::from(self.options.k) {
             return Err("发送窗口已满，须等待对端确认".to_owned());
@@ -246,7 +260,7 @@ impl Session {
         self.send_frame(Frame::I {
             send: self.sequence.send,
             recv: self.sequence.receive,
-            asdu: general_interrogation(self.config.common_address),
+            asdu,
         })?;
         self.sequence.send = (self.sequence.send + 1) & MASK;
         self.sequence.pending.push_back(Instant::now());

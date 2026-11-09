@@ -57,6 +57,9 @@ pub(crate) async fn check_update(
     app: tauri::AppHandle,
     state: tauri::State<'_, UpdateState>,
 ) -> Result<Option<UpdateInfo>, String> {
+    if crate::test_session() {
+        return Err(update_error("测试会话已禁用更新检查"));
+    }
     let mut candidate = state.begin_check()?;
     log::info!("开始检查主站 R2 更新清单");
     let updater = app
@@ -84,6 +87,9 @@ pub(crate) async fn check_update(
 
 #[tauri::command]
 pub(crate) async fn install_update(state: tauri::State<'_, UpdateState>) -> Result<(), String> {
+    if crate::test_session() {
+        return Err(update_error("测试会话已禁用更新安装"));
+    }
     let mut candidate = state.begin_install()?;
     let update = candidate
         .as_ref()

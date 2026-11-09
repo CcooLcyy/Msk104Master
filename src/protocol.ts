@@ -21,6 +21,7 @@ export interface FrameRow {
 export interface PointRow {
   id: string;
   time: string;
+  receivedFrameId: number;
   commonAddress: number;
   address: number;
   typeId: number;
@@ -31,11 +32,22 @@ export interface PointRow {
 
 type SessionState = "disconnected" | "connecting" | "starting" | "started" | "disconnecting";
 type DisplayData = { frames: FrameRow[]; points: PointRow[]; events: PointRow[] };
+interface SetpointResult {
+  operationId: number;
+  commonAddress: number;
+  address: number;
+  value: number;
+  status: "queued" | "sent" | "confirmed" | "terminated" | "rejected" | "failed" | "timeout";
+  message: string;
+  sentAt: string | null;
+  sentFrameId: number | null;
+}
 interface ProtocolSnapshot extends DisplayData {
   state: SessionState;
   error: string | null;
   interrogation: string;
   interrogationPending: boolean;
+  setpoint: SetpointResult | null;
   rxFrames: number;
   txFrames: number;
   rxBytes: number;
@@ -45,6 +57,7 @@ interface ProtocolSnapshot extends DisplayData {
 
 type ProtocolAction =
   | { kind: "connect"; config: ConnectionConfig }
+  | { kind: "setpoint"; address: number; value: number }
   | { kind: "disconnect" | "interrogate" | "clear" };
 
 const emptyDisplay: DisplayData = { frames: [], points: [], events: [] };
@@ -62,12 +75,14 @@ const initialSnapshot: ProtocolSnapshot = {
   error: null,
   interrogation: "未执行",
   interrogationPending: false,
+  setpoint: null,
 };
 
 const actions = {
   connect: { command: "protocol_connect", label: "连接" },
   disconnect: { command: "protocol_disconnect", label: "断开" },
   interrogate: { command: "protocol_interrogate", label: "总召" },
+  setpoint: { command: "protocol_setpoint", label: "遥调" },
   clear: { command: "protocol_clear", label: "清空显示" },
 };
 
@@ -165,7 +180,9 @@ export function useProtocol() {
     setActionError("");
     const { command, label } = actions[action.kind];
     try {
-      await invoke(command, action.kind === "connect" ? { config: action.config } : undefined);
+      const args = action.kind === "connect" ? { config: action.config }
+        : action.kind === "setpoint" ? { address: action.address, value: action.value } : undefined;
+      await invoke(command, args);
       if (action.kind === "connect" || action.kind === "clear") {
         latestDisplay.current = emptyDisplay;
         setDisplay(emptyDisplay);

@@ -9,6 +9,11 @@ struct AppInfo {
     name: &'static str,
     version: String,
     protocol_ready: bool,
+    test_session: bool,
+}
+
+fn test_session() -> bool {
+    std::env::var("MSK104MASTER_TEST_SESSION").is_ok_and(|value| value == "1")
 }
 
 #[tauri::command]
@@ -17,6 +22,7 @@ fn get_app_info(app: tauri::AppHandle) -> AppInfo {
         name: "Msk104Master",
         version: app.package_info().version.to_string(),
         protocol_ready: true,
+        test_session: test_session(),
     }
 }
 
@@ -46,6 +52,7 @@ pub fn run() {
             protocol::protocol_connect,
             protocol::protocol_disconnect,
             protocol::protocol_interrogate,
+            protocol::protocol_setpoint,
             protocol::protocol_clear,
             protocol::protocol_snapshot,
             updater::check_update,

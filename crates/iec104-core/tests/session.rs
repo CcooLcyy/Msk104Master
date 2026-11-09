@@ -6,7 +6,7 @@ use iec104_core::ConnectionConfig;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn receive(socket: &mut TcpStream) -> Vec<u8> {
     let mut header = [0; 2];
@@ -93,6 +93,109 @@ fn start_interrogate_acknowledge_and_stop_over_tcp() {
     session.disconnect();
     assert_eq!(session.connection_state(), ConnectionState::Disconnected);
     server.join().unwrap();
+}
+
+// 验证真实 TCP 会话中的短浮点执行帧及肯定、否定和错误应答证据。
+#[test]
+fn short_float_setpoint_preserves_replies_over_tcp() {
+    const REQUEST: [u8; 20] = [
+        0x68, 18, 0, 0, 0, 0, 50, 1, 6, 0, 1, 0, 7, 0, 0, 0, 0, 0x96, 0x43, 0,
+    ];
+    for causes in [vec![7u8, 10], vec![0x47], vec![0x6f]] {
+        let (listener, config) = fixture();
+        let replies = causes.clone();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            assert_eq!(receive(&mut socket), [0x68, 4, 7, 0, 0, 0]);
+            socket.write_all(&[0x68, 4, 11, 0, 0, 0]).unwrap();
+            assert_eq!(receive(&mut socket), REQUEST);
+            for (index, cause) in replies.into_iter().enumerate() {
+                let raw = [
+                    0x68,
+                    18,
+                    (index as u8) * 2,
+                    0,
+                    2,
+                    0,
+                    50,
+                    1,
+                    cause,
+                    0,
+                    1,
+                    0,
+                    7,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0x96,
+                    0x43,
+                    0,
+                ];
+                socket.write_all(&raw).unwrap();
+                assert_eq!(
+                    receive(&mut socket),
+                    [0x68, 4, 1, 0, (index as u8 + 1) * 2, 0]
+                );
+            }
+            let mut byte = [0];
+            assert_eq!(socket.read(&mut byte).unwrap(), 0);
+        });
+        let options = SessionOptions {
+            k: 1,
+            w: 1,
+            ..options()
+        };
+        let mut session = Session::connect(config, options).unwrap();
+        assert!(session.setpoint(7, 300.0).is_err());
+        session.start().unwrap();
+        assert!(session.setpoint(7, 300.0).is_err());
+        while session.transfer_state() != TransferState::Started {
+            session.poll().unwrap();
+        }
+        assert!(session.setpoint(7, f32::NAN).is_err());
+        session.setpoint(7, 300.0).unwrap();
+        // 遥调占用和总召相同的发送窗口，接收确认前不能再发 I 帧。
+        assert!(session.interrogate().is_err());
+        assert!(session.drain_events().iter().any(|event| matches!(event,
+            Event::Frame { direction: Direction::Send, raw } if raw == &REQUEST
+        )));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = Vec::new();
+        let mut decoded = Vec::new();
+        while decoded.len() < causes.len() && Instant::now() < deadline {
+            for event in session.poll().unwrap() {
+                match event {
+                    Event::Frame {
+                        direction: Direction::Receive,
+                        raw,
+                    } => received.push(raw),
+                    Event::Asdu(asdu) => decoded.push(asdu),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(decoded.len(), causes.len());
+        assert_eq!(received.len(), causes.len());
+        for ((asdu, raw), cause) in decoded.iter().zip(&received).zip(causes) {
+            assert_eq!(asdu.raw, &raw[6..]);
+            assert_eq!(asdu.type_id, 50);
+            assert_eq!(asdu.cause, cause & 0x3f);
+            assert_eq!(asdu.negative, cause & 0x40 != 0);
+            assert_eq!(asdu.common_address, 1);
+            assert_eq!(asdu.objects.len(), 1);
+            assert_eq!(asdu.objects[0].address, 7);
+            assert_eq!(asdu.objects[0].value, PointValue::Float(300.0));
+            assert_eq!(asdu.objects[0].quality, 0);
+            assert_eq!(asdu.objects[0].timestamp, None);
+        }
+        session.disconnect();
+        server.join().unwrap();
+    }
 }
 
 #[test]

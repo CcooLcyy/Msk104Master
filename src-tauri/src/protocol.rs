@@ -5,6 +5,7 @@ use iec104_core::session::{
 };
 use iec104_core::wire::{
     parse_asdu, Asdu, Decoder, Frame, InformationObject, PointValue, UFunction,
+    SHORT_FLOAT_SETPOINT_TYPE,
 };
 use iec104_core::ConnectionConfig;
 use serde::Serialize;
@@ -17,6 +18,7 @@ const FRAME_LIMIT: usize = 500;
 const POINT_LIMIT: usize = 2_000;
 const EVENT_LIMIT: usize = 500;
 const INTERROGATION_TIMEOUT: Duration = Duration::from_secs(15);
+const SETPOINT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,12 +48,38 @@ struct FrameRow {
 struct PointRow {
     id: String,
     time: String,
+    received_frame_id: u64,
     common_address: u16,
     address: u32,
     type_id: u8,
     value: String,
     quality: String,
     timestamp: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SetpointStatus {
+    Queued,
+    Sent,
+    Confirmed,
+    Terminated,
+    Rejected,
+    Failed,
+    Timeout,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetpointResult {
+    operation_id: u64,
+    common_address: u16,
+    address: u32,
+    value: f32,
+    status: SetpointStatus,
+    message: String,
+    sent_at: Option<String>,
+    sent_frame_id: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -61,6 +89,7 @@ pub(crate) struct ProtocolSnapshot {
     error: Option<String>,
     interrogation: String,
     interrogation_pending: bool,
+    setpoint: Option<SetpointResult>,
     rx_frames: u64,
     tx_frames: u64,
     rx_bytes: u64,
@@ -78,6 +107,7 @@ impl Default for ProtocolSnapshot {
             error: None,
             interrogation: "未执行".to_owned(),
             interrogation_pending: false,
+            setpoint: None,
             rx_frames: 0,
             tx_frames: 0,
             rx_bytes: 0,
@@ -110,6 +140,7 @@ pub(crate) struct ProtocolState {
 
 enum Action {
     Interrogate,
+    Setpoint { address: u32, value: f32 },
     Disconnect,
 }
 
@@ -124,11 +155,80 @@ struct Runtime {
     snapshot: ProtocolSnapshot,
     worker: Option<mpsc::Sender<Action>>,
     interrogation: Option<Interrogation>,
+    common_address: u16,
+    setpoint_deadline: Option<Instant>,
+    next_setpoint: u64,
     next_frame: u64,
     next_event: u64,
 }
 
 impl Runtime {
+    fn queue_setpoint(&mut self, address: u32, value: f32) {
+        self.next_setpoint += 1;
+        self.snapshot.setpoint = Some(SetpointResult {
+            operation_id: self.next_setpoint,
+            common_address: self.common_address,
+            address,
+            value,
+            status: SetpointStatus::Queued,
+            message: "遥调已排队".to_owned(),
+            sent_at: None,
+            sent_frame_id: None,
+        });
+    }
+
+    fn setpoint_status(&mut self, status: SetpointStatus, message: &str) {
+        if let Some(result) = self.snapshot.setpoint.as_mut() {
+            result.status = status;
+            result.message = message.to_owned();
+        }
+        if status != SetpointStatus::Sent {
+            self.setpoint_deadline = None;
+        }
+    }
+
+    fn expire_setpoint(&mut self, now: Instant) {
+        if self
+            .setpoint_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.setpoint_status(SetpointStatus::Timeout, "遥调等待确认超时，请重新连接");
+        }
+    }
+
+    fn update_setpoint(&mut self, asdu: &Asdu, now: Instant) {
+        self.expire_setpoint(now);
+        let Some(result) = self.snapshot.setpoint.as_ref() else {
+            return;
+        };
+        if asdu.type_id != SHORT_FLOAT_SETPOINT_TYPE
+            || asdu.test
+            || asdu.originator != 0
+            || asdu.common_address != result.common_address
+            || !matches!(asdu.objects.as_slice(), [object]
+                if object.address == result.address && object.quality == 0
+                    && matches!(&object.value, PointValue::Float(value)
+                        if value.to_bits() == result.value.to_bits()))
+        {
+            return;
+        }
+        match (result.status, asdu.cause, asdu.negative) {
+            (SetpointStatus::Sent, 7, false) => {
+                self.setpoint_status(SetpointStatus::Confirmed, "遥调已确认（COT 7）");
+            }
+            (SetpointStatus::Confirmed, 10, false) => {
+                self.setpoint_status(SetpointStatus::Terminated, "遥调已终止（COT 10）");
+            }
+            (SetpointStatus::Sent, 7, true) | (SetpointStatus::Confirmed, 10, true) => {
+                self.setpoint_status(SetpointStatus::Rejected, "遥调被对端否定");
+            }
+            (SetpointStatus::Sent, 44..=47, _) => {
+                self.setpoint_status(SetpointStatus::Rejected, "遥调被对端拒绝");
+            }
+            _ => {}
+        }
+    }
+
     fn begin_interrogation(&mut self, common_address: u16, now: Instant) {
         self.interrogation = Some(Interrogation {
             common_address,
@@ -206,7 +306,8 @@ impl Runtime {
                         add_asdu_details(row, &asdu);
                     }
                     self.update_interrogation(&asdu, now);
-                    if !asdu.test && !asdu.negative {
+                    self.update_setpoint(&asdu, now);
+                    if !asdu.test && !asdu.negative && asdu.type_id != SHORT_FLOAT_SETPOINT_TYPE {
                         self.update_points(&asdu, &time);
                     }
                     receiving_i = false;
@@ -227,6 +328,7 @@ impl Runtime {
             }
         }
         self.expire_interrogation(now);
+        self.expire_setpoint(now);
     }
 
     fn new_frame(&mut self, direction: &'static str, raw: &[u8], time: &str) -> FrameRow {
@@ -280,6 +382,7 @@ impl Runtime {
             let row = PointRow {
                 id,
                 time: time.to_owned(),
+                received_frame_id: self.next_frame,
                 common_address: asdu.common_address,
                 address: object.address,
                 type_id: asdu.type_id,
@@ -405,9 +508,14 @@ fn add_asdu_details(row: &mut FrameRow, asdu: &Asdu) {
     } in &asdu.objects
     {
         let (_, display) = point_value(value);
+        let qualifier = if asdu.type_id == SHORT_FLOAT_SETPOINT_TYPE {
+            "QOS"
+        } else {
+            "品质"
+        };
         let _ = write!(
             row.parsed,
-            "\nIOA={address} 值={display} 品质=0x{quality:02X}"
+            "\nIOA={address} 值={display} {qualifier}=0x{quality:02X}"
         );
         if let Some(raw) = timestamp {
             let _ = write!(row.parsed, " 时标={}", hex(raw));
@@ -430,6 +538,7 @@ pub(crate) fn protocol_connect(
         return Err("已有连接操作或活动会话".to_owned());
     }
     let (sender, receiver) = mpsc::channel();
+    let common_address = config.common_address;
     let shared = Arc::clone(&state.runtime);
     let _worker = thread::Builder::new()
         .name("iec104-workbench".to_owned())
@@ -439,6 +548,7 @@ pub(crate) fn protocol_connect(
         state: LinkState::Connecting,
         ..Default::default()
     };
+    runtime.common_address = common_address;
     runtime.worker = Some(sender);
     Ok(())
 }
@@ -475,6 +585,38 @@ pub(crate) fn protocol_interrogate(state: tauri::State<'_, ProtocolState>) -> Re
         .map_err(|_| "协议线程已退出".to_owned())?;
     runtime.snapshot.interrogation = "总召已排队".to_owned();
     runtime.snapshot.interrogation_pending = true;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn protocol_setpoint(
+    address: u32,
+    value: f32,
+    state: tauri::State<'_, ProtocolState>,
+) -> Result<(), String> {
+    if address > 0xff_ffff || !value.is_finite() {
+        return Err("遥调须使用三字节信息地址及有限的短浮点值".to_owned());
+    }
+    let mut runtime = lock(&state.runtime)?;
+    if runtime.snapshot.state != LinkState::Started {
+        return Err("数据传输启动后才可发送遥调".to_owned());
+    }
+    if let Some(result) = &runtime.snapshot.setpoint {
+        match result.status {
+            SetpointStatus::Queued | SetpointStatus::Sent => {
+                return Err("已有遥调正在等待响应".to_owned());
+            }
+            SetpointStatus::Timeout => return Err("请重新连接后发送遥调".to_owned()),
+            _ => {}
+        }
+    }
+    runtime
+        .worker
+        .as_ref()
+        .ok_or_else(|| "没有活动协议线程".to_owned())?
+        .send(Action::Setpoint { address, value })
+        .map_err(|_| "协议线程已退出".to_owned())?;
+    runtime.queue_setpoint(address, value);
     Ok(())
 }
 
@@ -521,6 +663,11 @@ fn run_worker(
         if runtime.snapshot.interrogation_pending {
             runtime.end_interrogation("会话已断开，总召结束");
         }
+        if runtime.snapshot.setpoint.as_ref().is_some_and(|result| {
+            matches!(result.status, SetpointStatus::Queued | SetpointStatus::Sent)
+        }) {
+            runtime.setpoint_status(SetpointStatus::Failed, "会话已断开，遥调结果未确认");
+        }
         runtime.snapshot.state = LinkState::Disconnected;
         runtime.worker = None;
     }
@@ -559,6 +706,36 @@ fn drive_session(
                     Err(error) => runtime.end_interrogation(&format!("总召未发送：{error}")),
                 }
             }
+            Ok(Action::Setpoint { address, value }) => {
+                if lock(shared)?.snapshot.state == LinkState::Disconnecting {
+                    return Ok(());
+                }
+                let result = session.setpoint(address, value);
+                let now = Instant::now();
+                let mut runtime = lock(shared)?;
+                runtime.ingest(session.drain_events(), now);
+                match result {
+                    Ok(()) => {
+                        let frame_id = runtime.next_frame;
+                        if let Some(result) = runtime.snapshot.setpoint.as_mut() {
+                            result.sent_at = Some(timestamp());
+                            result.sent_frame_id = Some(frame_id);
+                        }
+                        runtime.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
+                        runtime.setpoint_status(SetpointStatus::Sent, "遥调已发送，等待确认");
+                        log::info!("已发送 IEC104 短浮点遥调：CA={common_address} IOA={address} 值={value}");
+                    }
+                    Err(error) => {
+                        runtime.setpoint_status(
+                            SetpointStatus::Failed,
+                            &format!("遥调发送失败：{error}"),
+                        );
+                        if session.connection_state() == ConnectionState::Disconnected {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
             Err(mpsc::TryRecvError::Empty) => {}
         }
         let events = session.poll()?;
@@ -579,6 +756,78 @@ fn drive_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iec104_core::wire::short_float_setpoint;
+
+    #[test]
+    fn short_float_setpoint_matches_only_the_active_command() {
+        let now = Instant::now();
+        let mut runtime = Runtime {
+            common_address: 1,
+            ..Runtime::default()
+        };
+        runtime.queue_setpoint(7, -12.5);
+        runtime.setpoint_status(SetpointStatus::Sent, "遥调已发送");
+        runtime.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
+        for (ca, ioa, value, cause, oa, qos) in [
+            (2, 7, -12.5, 7, 0, 0),
+            (1, 8, -12.5, 7, 0, 0),
+            (1, 7, -12.6, 7, 0, 0),
+            (1, 7, -12.5, 0x87, 0, 0),
+            (1, 7, -12.5, 7, 1, 0),
+            (1, 7, -12.5, 7, 0, 0x80),
+            (1, 7, -12.5, 10, 0, 0),
+        ] {
+            let mut bytes = short_float_setpoint(ca, ioa, value).unwrap();
+            bytes[2] = cause;
+            bytes[3] = oa;
+            bytes[13] = qos;
+            runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now);
+            assert_eq!(
+                runtime.snapshot.setpoint.as_ref().unwrap().status,
+                SetpointStatus::Sent
+            );
+        }
+        let mut bytes = short_float_setpoint(1, 7, -12.5).unwrap();
+        bytes[2] = 7;
+        runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now);
+        assert_eq!(
+            runtime.snapshot.setpoint.as_ref().unwrap().status,
+            SetpointStatus::Confirmed
+        );
+        bytes[2] = 10;
+        runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now);
+        assert_eq!(
+            runtime.snapshot.setpoint.as_ref().unwrap().status,
+            SetpointStatus::Terminated
+        );
+    }
+
+    #[test]
+    fn short_float_setpoint_rejection_and_timeout_are_not_confirmation() {
+        let now = Instant::now();
+        let mut runtime = Runtime {
+            common_address: 1,
+            ..Runtime::default()
+        };
+        let mut bytes = short_float_setpoint(1, 7, 8.0).unwrap();
+        runtime.queue_setpoint(7, 8.0);
+        runtime.setpoint_status(SetpointStatus::Sent, "遥调已发送");
+        runtime.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
+        bytes[2] = 0x47;
+        runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now);
+        assert_eq!(
+            runtime.snapshot.setpoint.as_ref().unwrap().status,
+            SetpointStatus::Rejected
+        );
+        runtime.queue_setpoint(7, 8.0);
+        runtime.setpoint_status(SetpointStatus::Sent, "遥调已发送");
+        runtime.setpoint_deadline = Some(now + SETPOINT_TIMEOUT);
+        bytes[2] = 7;
+        runtime.update_setpoint(&parse_asdu(&bytes).unwrap(), now + SETPOINT_TIMEOUT);
+        let result = runtime.snapshot.setpoint.unwrap();
+        assert_eq!(result.operation_id, 2);
+        assert_eq!(result.status, SetpointStatus::Timeout);
+    }
 
     fn response(cause: u8, address: u16, qoi: u8) -> Asdu {
         let [low, high] = address.to_le_bytes();
