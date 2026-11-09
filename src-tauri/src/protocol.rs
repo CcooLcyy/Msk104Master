@@ -222,9 +222,12 @@ impl Runtime {
             .setpoint_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            let message = if self.snapshot.setpoint.as_ref().is_some_and(|result| {
-                result.status == SetpointStatus::Confirmed
-            }) {
+            let message = if self
+                .snapshot
+                .setpoint
+                .as_ref()
+                .is_some_and(|result| result.status == SetpointStatus::Confirmed)
+            {
                 "遥调等待终止超时，请重新连接"
             } else {
                 "遥调等待确认超时，请重新连接"
@@ -272,7 +275,9 @@ impl Runtime {
         }
         let (status, message) = match (result.status, asdu.cause, asdu.negative) {
             (SetpointStatus::Sent, 7, false) => (SetpointStatus::Confirmed, "遥调已确认（COT 7）"),
-            (SetpointStatus::Confirmed, 10, false) => (SetpointStatus::Terminated, "遥调已终止（COT 10）"),
+            (SetpointStatus::Confirmed, 10, false) => {
+                (SetpointStatus::Terminated, "遥调已终止（COT 10）")
+            }
             (SetpointStatus::Sent, 7, true) | (SetpointStatus::Confirmed, 10, true) => {
                 (SetpointStatus::Rejected, "遥调被对端否定")
             }
@@ -786,9 +791,12 @@ fn drive_session(
                 runtime.ingest(session.drain_events(), now);
                 match result {
                     Ok(()) => {
-                        if !runtime.snapshot.setpoint.as_ref().is_some_and(|result| {
-                            result.status == SetpointStatus::Sent
-                        }) {
+                        if runtime
+                            .snapshot
+                            .setpoint
+                            .as_ref()
+                            .is_none_or(|result| result.status != SetpointStatus::Sent)
+                        {
                             let error = "未找到本次遥调发送帧，请重新连接";
                             runtime.setpoint_status(SetpointStatus::Failed, error);
                             return Err(error.to_owned());
@@ -880,9 +888,24 @@ mod tests {
         let result = runtime.snapshot.setpoint.as_ref().unwrap();
         assert_eq!(result.status, SetpointStatus::Terminated);
         for (id, time, raw, frame) in [
-            (result.sent_frame_id, &result.sent_at, &result.sent_raw, &frames[0]),
-            (result.confirmed_frame_id, &result.confirmed_at, &result.confirmed_raw, &frames[4]),
-            (result.terminated_frame_id, &result.terminated_at, &result.terminated_raw, &frames[5]),
+            (
+                result.sent_frame_id,
+                &result.sent_at,
+                &result.sent_raw,
+                &frames[0],
+            ),
+            (
+                result.confirmed_frame_id,
+                &result.confirmed_at,
+                &result.confirmed_raw,
+                &frames[4],
+            ),
+            (
+                result.terminated_frame_id,
+                &result.terminated_at,
+                &result.terminated_raw,
+                &frames[5],
+            ),
         ] {
             assert_eq!(id, Some(frame.id));
             assert_eq!(time.as_deref(), Some(frame.time.as_str()));
